@@ -1,21 +1,22 @@
 /*
  * Copyright Elasticsearch B.V. and/or licensed to Elasticsearch B.V. under one
- * or more contributor license agreements. Licensed under the Elastic License;
- * you may not use this file except in compliance with the Elastic License.
+ * or more contributor license agreements. Licensed under the Elastic License
+ * 2.0; you may not use this file except in compliance with the Elastic License
+ * 2.0.
  */
 package org.elasticsearch.xpack.core.ml.action;
 
-import org.elasticsearch.action.ActionRequestBuilder;
 import org.elasticsearch.action.ActionType;
-import org.elasticsearch.client.ElasticsearchClient;
-import org.elasticsearch.common.ParseField;
 import org.elasticsearch.common.io.stream.StreamInput;
+import org.elasticsearch.xcontent.ParseField;
 import org.elasticsearch.xpack.core.action.AbstractGetResourcesRequest;
 import org.elasticsearch.xpack.core.action.AbstractGetResourcesResponse;
 import org.elasticsearch.xpack.core.action.util.QueryPage;
 import org.elasticsearch.xpack.core.ml.dataframe.DataFrameAnalyticsConfig;
 
 import java.io.IOException;
+
+import static org.elasticsearch.core.Strings.format;
 
 public class GetDataFrameAnalyticsAction extends ActionType<GetDataFrameAnalyticsAction.Response> {
 
@@ -47,6 +48,11 @@ public class GetDataFrameAnalyticsAction extends ActionType<GetDataFrameAnalytic
         public String getResourceIdField() {
             return DataFrameAnalyticsConfig.ID.getPreferredName();
         }
+
+        @Override
+        public String getCancelableTaskDescription() {
+            return format("get_data_frame_analytics[%s]", getResourceId());
+        }
     }
 
     public static class Response extends AbstractGetResourcesResponse<DataFrameAnalyticsConfig> {
@@ -64,13 +70,6 @@ public class GetDataFrameAnalyticsAction extends ActionType<GetDataFrameAnalytic
         @Override
         protected Reader<DataFrameAnalyticsConfig> getReader() {
             return DataFrameAnalyticsConfig::new;
-        }
-    }
-
-    public static class RequestBuilder extends ActionRequestBuilder<Request, Response> {
-
-        public RequestBuilder(ElasticsearchClient client) {
-            super(client, INSTANCE, new Request());
         }
     }
 }

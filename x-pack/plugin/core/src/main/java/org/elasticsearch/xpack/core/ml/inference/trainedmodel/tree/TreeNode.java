@@ -1,28 +1,30 @@
 /*
  * Copyright Elasticsearch B.V. and/or licensed to Elasticsearch B.V. under one
- * or more contributor license agreements. Licensed under the Elastic License;
- * you may not use this file except in compliance with the Elastic License.
+ * or more contributor license agreements. Licensed under the Elastic License
+ * 2.0; you may not use this file except in compliance with the Elastic License
+ * 2.0.
  */
 package org.elasticsearch.xpack.core.ml.inference.trainedmodel.tree;
 
 import org.apache.lucene.util.Accountable;
 import org.apache.lucene.util.RamUsageEstimator;
 import org.elasticsearch.common.Numbers;
-import org.elasticsearch.common.ParseField;
 import org.elasticsearch.common.Strings;
 import org.elasticsearch.common.io.stream.StreamInput;
 import org.elasticsearch.common.io.stream.StreamOutput;
 import org.elasticsearch.common.io.stream.Writeable;
-import org.elasticsearch.common.xcontent.ObjectParser;
-import org.elasticsearch.common.xcontent.ToXContentObject;
-import org.elasticsearch.common.xcontent.XContentBuilder;
-import org.elasticsearch.common.xcontent.XContentParser;
+import org.elasticsearch.xcontent.ObjectParser;
+import org.elasticsearch.xcontent.ParseField;
+import org.elasticsearch.xcontent.ToXContentObject;
+import org.elasticsearch.xcontent.XContentBuilder;
+import org.elasticsearch.xcontent.XContentParser;
 import org.elasticsearch.xpack.core.ml.job.config.Operator;
 
 import java.io.IOException;
+import java.util.Arrays;
+import java.util.Collections;
 import java.util.List;
 import java.util.Objects;
-
 
 public class TreeNode implements ToXContentObject, Writeable, Accountable {
 
@@ -38,27 +40,28 @@ public class TreeNode implements ToXContentObject, Writeable, Accountable {
     public static final ParseField NODE_INDEX = new ParseField("node_index");
     public static final ParseField SPLIT_GAIN = new ParseField("split_gain");
     public static final ParseField LEAF_VALUE = new ParseField("leaf_value");
+    public static final ParseField NUMBER_SAMPLES = new ParseField("number_samples");
 
     private static final ObjectParser<TreeNode.Builder, Void> LENIENT_PARSER = createParser(true);
     private static final ObjectParser<TreeNode.Builder, Void> STRICT_PARSER = createParser(false);
 
     private static ObjectParser<TreeNode.Builder, Void> createParser(boolean lenient) {
-        ObjectParser<TreeNode.Builder, Void> parser = new ObjectParser<>(
-            NAME,
-            lenient,
-            TreeNode.Builder::new);
+        ObjectParser<TreeNode.Builder, Void> parser = new ObjectParser<>(NAME, lenient, TreeNode.Builder::new);
         parser.declareDouble(TreeNode.Builder::setThreshold, THRESHOLD);
-        parser.declareField(TreeNode.Builder::setOperator,
+        parser.declareField(
+            TreeNode.Builder::setOperator,
             p -> Operator.fromString(p.text()),
             DECISION_TYPE,
-            ObjectParser.ValueType.STRING);
+            ObjectParser.ValueType.STRING
+        );
         parser.declareInt(TreeNode.Builder::setLeftChild, LEFT_CHILD);
         parser.declareInt(TreeNode.Builder::setRightChild, RIGHT_CHILD);
         parser.declareBoolean(TreeNode.Builder::setDefaultLeft, DEFAULT_LEFT);
         parser.declareInt(TreeNode.Builder::setSplitFeature, SPLIT_FEATURE);
         parser.declareInt(TreeNode.Builder::setNodeIndex, NODE_INDEX);
         parser.declareDouble(TreeNode.Builder::setSplitGain, SPLIT_GAIN);
-        parser.declareDouble(TreeNode.Builder::setLeafValue, LEAF_VALUE);
+        parser.declareDoubleArray(TreeNode.Builder::setLeafValue, LEAF_VALUE);
+        parser.declareLong(TreeNode.Builder::setNumberSamples, NUMBER_SAMPLES);
         return parser;
     }
 
@@ -71,30 +74,37 @@ public class TreeNode implements ToXContentObject, Writeable, Accountable {
     private final int splitFeature;
     private final int nodeIndex;
     private final double splitGain;
-    private final double leafValue;
+    private final double[] leafValue;
     private final boolean defaultLeft;
     private final int leftChild;
     private final int rightChild;
+    private final long numberSamples;
 
-
-    private TreeNode(Operator operator,
-                     Double threshold,
-                     Integer splitFeature,
-                     int nodeIndex,
-                     Double splitGain,
-                     Double leafValue,
-                     Boolean defaultLeft,
-                     Integer leftChild,
-                     Integer rightChild) {
+    private TreeNode(
+        Operator operator,
+        Double threshold,
+        Integer splitFeature,
+        int nodeIndex,
+        Double splitGain,
+        List<Double> leafValue,
+        Boolean defaultLeft,
+        Integer leftChild,
+        Integer rightChild,
+        long numberSamples
+    ) {
         this.operator = operator == null ? Operator.LTE : operator;
-        this.threshold  = threshold == null ? Double.NaN : threshold;
+        this.threshold = threshold == null ? Double.NaN : threshold;
         this.splitFeature = splitFeature == null ? -1 : splitFeature;
         this.nodeIndex = nodeIndex;
-        this.splitGain  = splitGain == null ? Double.NaN : splitGain;
-        this.leafValue = leafValue == null ? Double.NaN : leafValue;
+        this.splitGain = splitGain == null ? Double.NaN : splitGain;
+        this.leafValue = leafValue == null ? new double[0] : leafValue.stream().mapToDouble(Double::doubleValue).toArray();
         this.defaultLeft = defaultLeft == null ? false : defaultLeft;
-        this.leftChild  = leftChild == null ? -1 : leftChild;
+        this.leftChild = leftChild == null ? -1 : leftChild;
         this.rightChild = rightChild == null ? -1 : rightChild;
+        if (numberSamples < 0) {
+            throw new IllegalArgumentException("[" + NUMBER_SAMPLES.getPreferredName() + "] must be greater than or equal to 0");
+        }
+        this.numberSamples = numberSamples;
     }
 
     public TreeNode(StreamInput in) throws IOException {
@@ -103,12 +113,12 @@ public class TreeNode implements ToXContentObject, Writeable, Accountable {
         splitFeature = in.readInt();
         splitGain = in.readDouble();
         nodeIndex = in.readVInt();
-        leafValue = in.readDouble();
+        leafValue = in.readDoubleArray();
         defaultLeft = in.readBoolean();
         leftChild = in.readInt();
         rightChild = in.readInt();
+        numberSamples = in.readVLong();
     }
-
 
     public Operator getOperator() {
         return operator;
@@ -130,7 +140,7 @@ public class TreeNode implements ToXContentObject, Writeable, Accountable {
         return splitGain;
     }
 
-    public double getLeafValue() {
+    public double[] getLeafValue() {
         return leafValue;
     }
 
@@ -150,19 +160,8 @@ public class TreeNode implements ToXContentObject, Writeable, Accountable {
         return leftChild < 0;
     }
 
-    public int compare(List<Double> features) {
-        if (isLeaf()) {
-            throw new IllegalArgumentException("cannot call compare against a leaf node.");
-        }
-        Double feature = features.get(splitFeature);
-        if (isMissing(feature)) {
-            return defaultLeft ? leftChild : rightChild;
-        }
-        return operator.test(feature, threshold) ? leftChild : rightChild;
-    }
-
-    private boolean isMissing(Double feature) {
-        return feature == null;
+    public long getNumberSamples() {
+        return numberSamples;
     }
 
     @Override
@@ -172,10 +171,11 @@ public class TreeNode implements ToXContentObject, Writeable, Accountable {
         out.writeInt(splitFeature);
         out.writeDouble(splitGain);
         out.writeVInt(nodeIndex);
-        out.writeDouble(leafValue);
+        out.writeDoubleArray(leafValue);
         out.writeBoolean(defaultLeft);
         out.writeInt(leftChild);
         out.writeInt(rightChild);
+        out.writeVLong(numberSamples);
     }
 
     @Override
@@ -188,7 +188,9 @@ public class TreeNode implements ToXContentObject, Writeable, Accountable {
         }
         addOptionalDouble(builder, SPLIT_GAIN, splitGain);
         builder.field(NODE_INDEX.getPreferredName(), nodeIndex);
-        addOptionalDouble(builder, LEAF_VALUE, leafValue);
+        if (leafValue.length > 0) {
+            builder.field(LEAF_VALUE.getPreferredName(), leafValue);
+        }
         builder.field(DEFAULT_LEFT.getPreferredName(), defaultLeft);
         if (leftChild >= 0) {
             builder.field(LEFT_CHILD.getPreferredName(), leftChild);
@@ -196,6 +198,7 @@ public class TreeNode implements ToXContentObject, Writeable, Accountable {
         if (rightChild >= 0) {
             builder.field(RIGHT_CHILD.getPreferredName(), rightChild);
         }
+        builder.field(NUMBER_SAMPLES.getPreferredName(), numberSamples);
         builder.endObject();
         return builder;
     }
@@ -216,23 +219,27 @@ public class TreeNode implements ToXContentObject, Writeable, Accountable {
             && Objects.equals(splitFeature, that.splitFeature)
             && Objects.equals(nodeIndex, that.nodeIndex)
             && Objects.equals(splitGain, that.splitGain)
-            && Objects.equals(leafValue, that.leafValue)
+            && Arrays.equals(leafValue, that.leafValue)
             && Objects.equals(defaultLeft, that.defaultLeft)
             && Objects.equals(leftChild, that.leftChild)
-            && Objects.equals(rightChild, that.rightChild);
+            && Objects.equals(rightChild, that.rightChild)
+            && Objects.equals(numberSamples, that.numberSamples);
     }
 
     @Override
     public int hashCode() {
-        return Objects.hash(operator,
+        return Objects.hash(
+            operator,
             threshold,
             splitFeature,
             splitGain,
             nodeIndex,
-            leafValue,
+            Arrays.hashCode(leafValue),
             defaultLeft,
             leftChild,
-            rightChild);
+            rightChild,
+            numberSamples
+        );
     }
 
     @Override
@@ -246,7 +253,7 @@ public class TreeNode implements ToXContentObject, Writeable, Accountable {
 
     @Override
     public long ramBytesUsed() {
-        return SHALLOW_SIZE;
+        return SHALLOW_SIZE + this.leafValue.length * Double.BYTES;
     }
 
     public static class Builder {
@@ -255,17 +262,17 @@ public class TreeNode implements ToXContentObject, Writeable, Accountable {
         private Integer splitFeature;
         private int nodeIndex;
         private Double splitGain;
-        private Double leafValue;
+        private List<Double> leafValue;
         private Boolean defaultLeft;
         private Integer leftChild;
         private Integer rightChild;
+        private long numberSamples;
 
         public Builder(int nodeIndex) {
             this.nodeIndex = nodeIndex;
         }
 
-        private Builder() {
-        }
+        private Builder() {}
 
         public Builder setOperator(Operator operator) {
             this.operator = operator;
@@ -292,9 +299,17 @@ public class TreeNode implements ToXContentObject, Writeable, Accountable {
             return this;
         }
 
-        public Builder setLeafValue(Double leafValue) {
+        public Builder setLeafValue(double leafValue) {
+            return this.setLeafValue(Collections.singletonList(leafValue));
+        }
+
+        public Builder setLeafValue(List<Double> leafValue) {
             this.leafValue = leafValue;
             return this;
+        }
+
+        List<Double> getLeafValue() {
+            return this.leafValue;
         }
 
         public Builder setDefaultLeft(Boolean defaultLeft) {
@@ -307,7 +322,7 @@ public class TreeNode implements ToXContentObject, Writeable, Accountable {
             return this;
         }
 
-        Integer getLeftChild() {
+        public Integer getLeftChild() {
             return leftChild;
         }
 
@@ -316,8 +331,13 @@ public class TreeNode implements ToXContentObject, Writeable, Accountable {
             return this;
         }
 
-        Integer getRightChild() {
+        public Integer getRightChild() {
             return rightChild;
+        }
+
+        public Builder setNumberSamples(long numberSamples) {
+            this.numberSamples = numberSamples;
+            return this;
         }
 
         public void validate() {
@@ -327,6 +347,9 @@ public class TreeNode implements ToXContentObject, Writeable, Accountable {
             if (leftChild == null) { // leaf validations
                 if (leafValue == null) {
                     throw new IllegalArgumentException("[leaf_value] is required for a leaf node.");
+                }
+                if (leafValue.stream().anyMatch(Objects::isNull)) {
+                    throw new IllegalArgumentException("[leaf_value] cannot have null values.");
                 }
             } else {
                 if (leftChild < 0) {
@@ -340,18 +363,21 @@ public class TreeNode implements ToXContentObject, Writeable, Accountable {
                 }
             }
         }
-        
+
         public TreeNode build() {
             validate();
-            return new TreeNode(operator,
-                threshold, 
-                splitFeature, 
-                nodeIndex, 
-                splitGain, 
-                leafValue, 
-                defaultLeft, 
-                leftChild, 
-                rightChild);
+            return new TreeNode(
+                operator,
+                threshold,
+                splitFeature,
+                nodeIndex,
+                splitGain,
+                leafValue,
+                defaultLeft,
+                leftChild,
+                rightChild,
+                numberSamples
+            );
         }
     }
 }

@@ -1,14 +1,15 @@
 /*
  * Copyright Elasticsearch B.V. and/or licensed to Elasticsearch B.V. under one
- * or more contributor license agreements. Licensed under the Elastic License;
- * you may not use this file except in compliance with the Elastic License.
+ * or more contributor license agreements. Licensed under the Elastic License
+ * 2.0; you may not use this file except in compliance with the Elastic License
+ * 2.0.
  */
 package org.elasticsearch.xpack.core.security.action.realm;
 
-import org.elasticsearch.action.support.nodes.BaseNodeRequest;
 import org.elasticsearch.action.support.nodes.BaseNodesRequest;
 import org.elasticsearch.common.io.stream.StreamInput;
 import org.elasticsearch.common.io.stream.StreamOutput;
+import org.elasticsearch.transport.TransportRequest;
 
 import java.io.IOException;
 
@@ -16,7 +17,6 @@ public class ClearRealmCacheRequest extends BaseNodesRequest<ClearRealmCacheRequ
 
     String[] realms;
     String[] usernames;
-
 
     public ClearRealmCacheRequest() {
         super((String[]) null);
@@ -85,7 +85,7 @@ public class ClearRealmCacheRequest extends BaseNodesRequest<ClearRealmCacheRequ
         out.writeStringArrayNullable(usernames);
     }
 
-    public static class Node extends BaseNodeRequest {
+    public static class Node extends TransportRequest {
 
         private String[] realms;
         private String[] usernames;
@@ -100,8 +100,14 @@ public class ClearRealmCacheRequest extends BaseNodesRequest<ClearRealmCacheRequ
             this.realms = request.realms;
             this.usernames = request.usernames;
         }
-        public String[] getRealms() { return realms; }
-        public String[] getUsernames() { return usernames; }
+
+        public String[] getRealms() {
+            return realms;
+        }
+
+        public String[] getUsernames() {
+            return usernames;
+        }
 
         @Override
         public void writeTo(StreamOutput out) throws IOException {

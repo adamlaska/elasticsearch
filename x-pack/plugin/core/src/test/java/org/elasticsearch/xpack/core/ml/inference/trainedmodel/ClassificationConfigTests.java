@@ -1,37 +1,36 @@
 /*
  * Copyright Elasticsearch B.V. and/or licensed to Elasticsearch B.V. under one
- * or more contributor license agreements. Licensed under the Elastic License;
- * you may not use this file except in compliance with the Elastic License.
+ * or more contributor license agreements. Licensed under the Elastic License
+ * 2.0; you may not use this file except in compliance with the Elastic License
+ * 2.0.
  */
 package org.elasticsearch.xpack.core.ml.inference.trainedmodel;
 
-import org.elasticsearch.ElasticsearchException;
+import org.elasticsearch.Version;
 import org.elasticsearch.common.io.stream.Writeable;
-import org.elasticsearch.test.AbstractWireSerializingTestCase;
+import org.elasticsearch.xcontent.XContentParser;
+import org.elasticsearch.xpack.core.ml.AbstractBWCSerializationTestCase;
+import org.junit.Before;
 
-import java.util.Collections;
+import java.io.IOException;
 
-import static org.hamcrest.Matchers.equalTo;
+public class ClassificationConfigTests extends AbstractBWCSerializationTestCase<ClassificationConfig> {
 
-public class ClassificationConfigTests extends AbstractWireSerializingTestCase<ClassificationConfig> {
+    private boolean lenient;
 
     public static ClassificationConfig randomClassificationConfig() {
-        return new ClassificationConfig(randomBoolean() ? null : randomIntBetween(-1, 10));
+        return new ClassificationConfig(
+            randomBoolean() ? null : randomIntBetween(-1, 10),
+            randomBoolean() ? null : randomAlphaOfLength(10),
+            randomBoolean() ? null : randomAlphaOfLength(10),
+            randomBoolean() ? null : randomIntBetween(0, 10),
+            randomFrom(PredictionFieldType.values())
+        );
     }
 
-    public void testFromMap() {
-        ClassificationConfig expected = new ClassificationConfig(0);
-        assertThat(ClassificationConfig.fromMap(Collections.emptyMap()), equalTo(expected));
-
-        expected = new ClassificationConfig(3);
-        assertThat(ClassificationConfig.fromMap(Collections.singletonMap(ClassificationConfig.NUM_TOP_CLASSES.getPreferredName(), 3)),
-            equalTo(expected));
-    }
-
-    public void testFromMapWithUnknownField() {
-        ElasticsearchException ex = expectThrows(ElasticsearchException.class,
-            () -> ClassificationConfig.fromMap(Collections.singletonMap("some_key", 1)));
-        assertThat(ex.getMessage(), equalTo("Unrecognized fields [some_key]."));
+    @Before
+    public void chooseStrictOrLenient() {
+        lenient = randomBoolean();
     }
 
     @Override
@@ -44,4 +43,18 @@ public class ClassificationConfigTests extends AbstractWireSerializingTestCase<C
         return ClassificationConfig::new;
     }
 
+    @Override
+    protected ClassificationConfig doParseInstance(XContentParser parser) throws IOException {
+        return lenient ? ClassificationConfig.fromXContentLenient(parser) : ClassificationConfig.fromXContentStrict(parser);
+    }
+
+    @Override
+    protected boolean supportsUnknownFields() {
+        return lenient;
+    }
+
+    @Override
+    protected ClassificationConfig mutateInstanceForVersion(ClassificationConfig instance, Version version) {
+        return instance;
+    }
 }

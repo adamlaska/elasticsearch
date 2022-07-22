@@ -3,10 +3,7 @@ realm and map Active Directory users and groups to roles in the role mapping fil
 
 . Add a realm configuration of type `active_directory` to `elasticsearch.yml`
 under the `xpack.security.authc.realms.active_directory` namespace.
-At a minimum, you must specify the Active Directory `domain_name`.
-If you are configuring multiple realms, you should also 
-explicitly set the `order` attribute to control the order in which the realms 
-are consulted during authentication. 
+At a minimum, you must specify the Active Directory `domain_name` and `order`.
 +
 --
 See <<ref-ad-settings>> for all of the options you can set for an 
@@ -92,7 +89,7 @@ Directory servers.
 + 
 --
 The `load_balance.type` setting can be used at the realm level. Two modes of
-operation are supported: failover and load balancing.  See <<ref-ad-settings>>. 
+operation are supported: failover and load balancing. See <<ref-ad-settings>>. 
 --
 
 . (Optional) To protect passwords, 
@@ -100,7 +97,7 @@ operation are supported: failover and load balancing.  See <<ref-ad-settings>>.
 
 . Restart {es}.
 
-. Configure a bind user. 
+. (Optional) Configure a bind user. 
 +
 --
 The Active Directory realm authenticates users using an LDAP bind request. By 

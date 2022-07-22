@@ -1,30 +1,23 @@
 /*
- * Licensed to Elasticsearch under one or more contributor
- * license agreements. See the NOTICE file distributed with
- * this work for additional information regarding copyright
- * ownership. Elasticsearch licenses this file to you under
- * the Apache License, Version 2.0 (the "License"); you may
- * not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *    http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing,
- * software distributed under the License is distributed on an
- * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
- * KIND, either express or implied.  See the License for the
- * specific language governing permissions and limitations
- * under the License.
+ * Copyright Elasticsearch B.V. and/or licensed to Elasticsearch B.V. under one
+ * or more contributor license agreements. Licensed under the Elastic License
+ * 2.0 and the Server Side Public License, v 1; you may not use this file except
+ * in compliance with, at your election, the Elastic License 2.0 or the Server
+ * Side Public License, v 1.
  */
 
 package org.elasticsearch.common.io.stream;
 
+import org.apache.lucene.util.BytesRef;
+import org.apache.lucene.util.BytesRefIterator;
+import org.elasticsearch.common.bytes.BytesArray;
 import org.elasticsearch.common.bytes.BytesReference;
-import org.elasticsearch.common.bytes.PagedBytesReference;
 import org.elasticsearch.common.util.BigArrays;
 import org.elasticsearch.common.util.ByteArray;
 import org.elasticsearch.common.util.PageCacheRecycler;
+import org.elasticsearch.core.Nullable;
 
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 
 /**
@@ -35,6 +28,7 @@ public class BytesStreamOutput extends BytesStream {
 
     protected final BigArrays bigArrays;
 
+    @Nullable
     protected ByteArray bytes;
     protected int count;
 
@@ -59,16 +53,18 @@ public class BytesStreamOutput extends BytesStream {
 
     protected BytesStreamOutput(int expectedSize, BigArrays bigArrays) {
         this.bigArrays = bigArrays;
-        this.bytes = bigArrays.newByteArray(expectedSize, false);
+        if (expectedSize != 0) {
+            this.bytes = bigArrays.newByteArray(expectedSize, false);
+        }
     }
 
     @Override
-    public long position() throws IOException {
+    public long position() {
         return count;
     }
 
     @Override
-    public void writeByte(byte b) throws IOException {
+    public void writeByte(byte b) {
         ensureCapacity(count + 1L);
         bytes.set(count, b);
         count++;
@@ -96,10 +92,9 @@ public class BytesStreamOutput extends BytesStream {
         count += length;
     }
 
-    @Override
     public void reset() {
         // shrink list of pages
-        if (bytes.size() > PageCacheRecycler.PAGE_SIZE_IN_BYTES) {
+        if (bytes != null && bytes.size() > PageCacheRecycler.PAGE_SIZE_IN_BYTES) {
             bytes = bigArrays.resize(bytes, PageCacheRecycler.PAGE_SIZE_IN_BYTES);
         }
 
@@ -108,11 +103,10 @@ public class BytesStreamOutput extends BytesStream {
     }
 
     @Override
-    public void flush() throws IOException {
+    public void flush() {
         // nothing to do
     }
 
-    @Override
     public void seek(long position) {
         ensureCapacity(position);
         count = (int) position;
@@ -132,7 +126,7 @@ public class BytesStreamOutput extends BytesStream {
      *
      * @return the value of the <code>count</code> field, which is the number of valid
      *         bytes in this output stream.
-     * @see java.io.ByteArrayOutputStream#count
+     * @see ByteArrayOutputStream#size()
      */
     public int size() {
         return count;
@@ -140,22 +134,51 @@ public class BytesStreamOutput extends BytesStream {
 
     @Override
     public BytesReference bytes() {
-        return new PagedBytesReference(bytes, count);
+        if (bytes == null) {
+            return BytesArray.EMPTY;
+        }
+        return BytesReference.fromByteArray(bytes, count);
     }
 
     /**
-     * Returns the number of bytes used by the underlying {@link org.elasticsearch.common.util.ByteArray}
-     * @see org.elasticsearch.common.util.ByteArray#ramBytesUsed()
+     * Like {@link #bytes()} but copies the bytes to a freshly allocated buffer.
+     *
+     * @return copy of the bytes in this instances
      */
-    public long ramBytesUsed() {
-        return bytes.ramBytesUsed();
+    public BytesReference copyBytes() {
+        final BytesReference bytesReference = bytes();
+        final byte[] arr = new byte[count];
+        if (bytesReference.hasArray()) {
+            System.arraycopy(bytesReference.array(), bytesReference.arrayOffset(), arr, 0, bytesReference.length());
+        } else {
+            copyToArray(bytesReference, arr);
+        }
+        return new BytesArray(arr);
     }
 
-    void ensureCapacity(long offset) {
+    private static void copyToArray(BytesReference bytesReference, byte[] arr) {
+        int offset = 0;
+        final BytesRefIterator iterator = bytesReference.iterator();
+        try {
+            BytesRef slice;
+            while ((slice = iterator.next()) != null) {
+                System.arraycopy(slice.bytes, slice.offset, arr, offset, slice.length);
+                offset += slice.length;
+            }
+        } catch (IOException e) {
+            throw new AssertionError(e);
+        }
+    }
+
+    protected void ensureCapacity(long offset) {
         if (offset > Integer.MAX_VALUE) {
             throw new IllegalArgumentException(getClass().getSimpleName() + " cannot hold more than 2GB of data");
         }
-        bytes = bigArrays.grow(bytes, offset);
+        if (bytes == null) {
+            this.bytes = bigArrays.newByteArray(BigArrays.overSize(offset, PageCacheRecycler.PAGE_SIZE_IN_BYTES, 1), false);
+        } else {
+            bytes = bigArrays.grow(bytes, offset);
+        }
     }
 
 }

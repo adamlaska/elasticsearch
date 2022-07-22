@@ -1,34 +1,41 @@
 /*
  * Copyright Elasticsearch B.V. and/or licensed to Elasticsearch B.V. under one
- * or more contributor license agreements. Licensed under the Elastic License;
- * you may not use this file except in compliance with the Elastic License.
+ * or more contributor license agreements. Licensed under the Elastic License
+ * 2.0; you may not use this file except in compliance with the Elastic License
+ * 2.0.
  */
 package org.elasticsearch.license;
 
 import org.apache.logging.log4j.Logger;
-import org.apache.logging.log4j.message.ParameterizedMessage;
 import org.elasticsearch.Version;
 import org.elasticsearch.action.ActionListener;
 import org.elasticsearch.cluster.ClusterState;
-import org.elasticsearch.cluster.ClusterStateUpdateTask;
-import org.elasticsearch.cluster.metadata.MetaData;
-import org.elasticsearch.common.Nullable;
+import org.elasticsearch.cluster.ClusterStateTaskExecutor;
+import org.elasticsearch.cluster.ClusterStateTaskListener;
+import org.elasticsearch.cluster.metadata.Metadata;
+import org.elasticsearch.cluster.node.DiscoveryNodes;
+import org.elasticsearch.core.Nullable;
 import org.elasticsearch.xpack.core.XPackPlugin;
 
 import java.time.Clock;
 import java.util.Collections;
+import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 
-public class StartTrialClusterTask extends ClusterStateUpdateTask {
+public class StartTrialClusterTask implements ClusterStateTaskListener {
 
-    private static final String ACKNOWLEDGEMENT_HEADER = "This API initiates a free 30-day trial for all platinum features. " +
-            "By starting this trial, you agree that it is subject to the terms and conditions at" +
-            " https://www.elastic.co/legal/trial_license/. To begin your free trial, call /start_trial again and specify " +
-            "the \"acknowledge=true\" parameter.";
+    private static final String ACKNOWLEDGEMENT_HEADER = "This API initiates a free 30-day trial for all platinum features. "
+        + "By starting this trial, you agree that it is subject to the terms and conditions at"
+        + " https://www.elastic.co/legal/trial_license/. To begin your free trial, call /start_trial again and specify "
+        + "the \"acknowledge=true\" parameter.";
 
-    private static final Map<String, String[]> ACK_MESSAGES = Collections.singletonMap("security",
-            new String[] {"With a trial license, X-Pack security features are available, but are not enabled by default."});
+    private static final Map<String, String[]> ACK_MESSAGES = Collections.singletonMap(
+        "security",
+        new String[] { "With a trial license, X-Pack security features are available, but are not enabled by default." }
+    );
+
+    static final String TASK_SOURCE = "started trial license";
 
     private final Logger logger;
     private final String clusterName;
@@ -36,8 +43,13 @@ public class StartTrialClusterTask extends ClusterStateUpdateTask {
     private final ActionListener<PostStartTrialResponse> listener;
     private final Clock clock;
 
-    StartTrialClusterTask(Logger logger, String clusterName, Clock clock, PostStartTrialRequest request,
-                          ActionListener<PostStartTrialResponse> listener) {
+    StartTrialClusterTask(
+        Logger logger,
+        String clusterName,
+        Clock clock,
+        PostStartTrialRequest request,
+        ActionListener<PostStartTrialResponse> listener
+    ) {
         this.logger = logger;
         this.clusterName = clusterName;
         this.request = request;
@@ -46,51 +58,78 @@ public class StartTrialClusterTask extends ClusterStateUpdateTask {
     }
 
     @Override
-    public void clusterStateProcessed(String source, ClusterState oldState, ClusterState newState) {
-        LicensesMetaData oldLicensesMetaData = oldState.metaData().custom(LicensesMetaData.TYPE);
-        logger.debug("started self generated trial license: {}", oldLicensesMetaData);
-
-        if (request.isAcknowledged() == false) {
-            listener.onResponse(new PostStartTrialResponse(PostStartTrialResponse.Status.NEED_ACKNOWLEDGEMENT,
-                    ACK_MESSAGES, ACKNOWLEDGEMENT_HEADER));
-        } else if (oldLicensesMetaData == null || oldLicensesMetaData.isEligibleForTrial()) {
-            listener.onResponse(new PostStartTrialResponse(PostStartTrialResponse.Status.UPGRADED_TO_TRIAL));
-        } else {
-            listener.onResponse(new PostStartTrialResponse(PostStartTrialResponse.Status.TRIAL_ALREADY_ACTIVATED));
-        }
+    public void clusterStateProcessed(ClusterState oldState, ClusterState newState) {
+        assert false : "never called";
     }
 
-    @Override
-    public ClusterState execute(ClusterState currentState) throws Exception {
-        XPackPlugin.checkReadyForXPackCustomMetadata(currentState);
-        LicensesMetaData currentLicensesMetaData = currentState.metaData().custom(LicensesMetaData.TYPE);
-
+    private LicensesMetadata execute(
+        LicensesMetadata currentLicensesMetadata,
+        DiscoveryNodes discoveryNodes,
+        ClusterStateTaskExecutor.TaskContext<StartTrialClusterTask> taskContext
+    ) {
+        assert taskContext.getTask() == this;
+        final var listener = ActionListener.runBefore(
+            this.listener,
+            () -> { logger.debug("started self generated trial license: {}", currentLicensesMetadata); }
+        );
         if (request.isAcknowledged() == false) {
-            return currentState;
-        } else if (currentLicensesMetaData == null || currentLicensesMetaData.isEligibleForTrial()) {
+            taskContext.success(
+                () -> listener.onResponse(
+                    new PostStartTrialResponse(PostStartTrialResponse.Status.NEED_ACKNOWLEDGEMENT, ACK_MESSAGES, ACKNOWLEDGEMENT_HEADER)
+                )
+            );
+            return currentLicensesMetadata;
+        } else if (currentLicensesMetadata == null || currentLicensesMetadata.isEligibleForTrial()) {
             long issueDate = clock.millis();
-            MetaData.Builder mdBuilder = MetaData.builder(currentState.metaData());
             long expiryDate = issueDate + LicenseService.NON_BASIC_SELF_GENERATED_LICENSE_DURATION.getMillis();
 
             License.Builder specBuilder = License.builder()
-                    .uid(UUID.randomUUID().toString())
-                    .issuedTo(clusterName)
-                    .maxNodes(LicenseService.SELF_GENERATED_LICENSE_MAX_NODES)
-                    .issueDate(issueDate)
-                    .type(request.getType())
-                    .expiryDate(expiryDate);
-            License selfGeneratedLicense = SelfGeneratedLicense.create(specBuilder, currentState.nodes());
-            LicensesMetaData newLicensesMetaData = new LicensesMetaData(selfGeneratedLicense, Version.CURRENT);
-            mdBuilder.putCustom(LicensesMetaData.TYPE, newLicensesMetaData);
-            return ClusterState.builder(currentState).metaData(mdBuilder).build();
+                .uid(UUID.randomUUID().toString())
+                .issuedTo(clusterName)
+                .issueDate(issueDate)
+                .type(request.getType())
+                .expiryDate(expiryDate);
+            if (License.LicenseType.isEnterprise(request.getType())) {
+                specBuilder.maxResourceUnits(LicenseService.SELF_GENERATED_LICENSE_MAX_RESOURCE_UNITS);
+            } else {
+                specBuilder.maxNodes(LicenseService.SELF_GENERATED_LICENSE_MAX_NODES);
+            }
+            License selfGeneratedLicense = SelfGeneratedLicense.create(specBuilder, discoveryNodes);
+            LicensesMetadata newLicensesMetadata = new LicensesMetadata(selfGeneratedLicense, Version.CURRENT);
+            taskContext.success(() -> listener.onResponse(new PostStartTrialResponse(PostStartTrialResponse.Status.UPGRADED_TO_TRIAL)));
+            return newLicensesMetadata;
         } else {
-            return currentState;
+            taskContext.success(
+                () -> listener.onResponse(new PostStartTrialResponse(PostStartTrialResponse.Status.TRIAL_ALREADY_ACTIVATED))
+            );
+            return currentLicensesMetadata;
         }
     }
 
     @Override
-    public void onFailure(String source, @Nullable Exception e) {
-        logger.error(new ParameterizedMessage("unexpected failure during [{}]", source), e);
+    public void onFailure(@Nullable Exception e) {
+        logger.error("unexpected failure during [" + TASK_SOURCE + "]", e);
         listener.onFailure(e);
     }
+
+    static class Executor implements ClusterStateTaskExecutor<StartTrialClusterTask> {
+
+        @Override
+        public ClusterState execute(ClusterState currentState, List<TaskContext<StartTrialClusterTask>> taskContexts) throws Exception {
+            XPackPlugin.checkReadyForXPackCustomMetadata(currentState);
+            final LicensesMetadata originalLicensesMetadata = currentState.metadata().custom(LicensesMetadata.TYPE);
+            var currentLicensesMetadata = originalLicensesMetadata;
+            for (final var taskContext : taskContexts) {
+                currentLicensesMetadata = taskContext.getTask().execute(currentLicensesMetadata, currentState.nodes(), taskContext);
+            }
+            if (currentLicensesMetadata == originalLicensesMetadata) {
+                return currentState;
+            } else {
+                return ClusterState.builder(currentState)
+                    .metadata(Metadata.builder(currentState.metadata()).putCustom(LicensesMetadata.TYPE, currentLicensesMetadata))
+                    .build();
+            }
+        }
+    }
+
 }

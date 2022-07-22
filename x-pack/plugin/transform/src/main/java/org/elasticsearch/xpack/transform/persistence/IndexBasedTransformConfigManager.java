@@ -1,7 +1,8 @@
 /*
  * Copyright Elasticsearch B.V. and/or licensed to Elasticsearch B.V. under one
- * or more contributor license agreements. Licensed under the Elastic License;
- * you may not use this file except in compliance with the Elastic License.
+ * or more contributor license agreements. Licensed under the Elastic License
+ * 2.0; you may not use this file except in compliance with the Elastic License
+ * 2.0.
  */
 
 package org.elasticsearch.xpack.transform.persistence;
@@ -14,6 +15,10 @@ import org.elasticsearch.ResourceAlreadyExistsException;
 import org.elasticsearch.ResourceNotFoundException;
 import org.elasticsearch.action.ActionListener;
 import org.elasticsearch.action.DocWriteRequest;
+import org.elasticsearch.action.admin.indices.delete.DeleteIndexAction;
+import org.elasticsearch.action.admin.indices.delete.DeleteIndexRequest;
+import org.elasticsearch.action.admin.indices.refresh.RefreshRequest;
+import org.elasticsearch.action.admin.indices.refresh.RefreshResponse;
 import org.elasticsearch.action.bulk.BulkItemResponse;
 import org.elasticsearch.action.index.IndexAction;
 import org.elasticsearch.action.index.IndexRequest;
@@ -22,30 +27,37 @@ import org.elasticsearch.action.search.SearchRequest;
 import org.elasticsearch.action.search.SearchResponse;
 import org.elasticsearch.action.support.IndicesOptions;
 import org.elasticsearch.action.support.WriteRequest;
-import org.elasticsearch.client.Client;
+import org.elasticsearch.client.internal.Client;
+import org.elasticsearch.cluster.ClusterState;
+import org.elasticsearch.cluster.metadata.IndexNameExpressionResolver;
+import org.elasticsearch.cluster.service.ClusterService;
 import org.elasticsearch.common.Strings;
 import org.elasticsearch.common.bytes.BytesReference;
-import org.elasticsearch.common.collect.Tuple;
 import org.elasticsearch.common.regex.Regex;
+import org.elasticsearch.common.util.concurrent.ThreadContext;
+import org.elasticsearch.common.util.set.Sets;
 import org.elasticsearch.common.xcontent.LoggingDeprecationHandler;
-import org.elasticsearch.common.xcontent.NamedXContentRegistry;
-import org.elasticsearch.common.xcontent.ToXContent;
-import org.elasticsearch.common.xcontent.XContentBuilder;
-import org.elasticsearch.common.xcontent.XContentFactory;
-import org.elasticsearch.common.xcontent.XContentParser;
-import org.elasticsearch.common.xcontent.XContentType;
+import org.elasticsearch.core.Tuple;
 import org.elasticsearch.index.IndexNotFoundException;
 import org.elasticsearch.index.engine.VersionConflictEngineException;
 import org.elasticsearch.index.query.BoolQueryBuilder;
 import org.elasticsearch.index.query.QueryBuilder;
 import org.elasticsearch.index.query.QueryBuilders;
+import org.elasticsearch.index.reindex.AbstractBulkByScrollRequest;
 import org.elasticsearch.index.reindex.BulkByScrollResponse;
 import org.elasticsearch.index.reindex.DeleteByQueryAction;
 import org.elasticsearch.index.reindex.DeleteByQueryRequest;
 import org.elasticsearch.index.reindex.ScrollableHitSource;
 import org.elasticsearch.rest.RestStatus;
 import org.elasticsearch.search.SearchHit;
+import org.elasticsearch.search.builder.SearchSourceBuilder;
 import org.elasticsearch.search.sort.SortOrder;
+import org.elasticsearch.xcontent.NamedXContentRegistry;
+import org.elasticsearch.xcontent.ToXContent;
+import org.elasticsearch.xcontent.XContentBuilder;
+import org.elasticsearch.xcontent.XContentFactory;
+import org.elasticsearch.xcontent.XContentParser;
+import org.elasticsearch.xcontent.XContentType;
 import org.elasticsearch.xpack.core.action.util.ExpandedIdsMatcher;
 import org.elasticsearch.xpack.core.action.util.PageParams;
 import org.elasticsearch.xpack.core.transform.TransformField;
@@ -58,11 +70,13 @@ import org.elasticsearch.xpack.core.transform.transforms.persistence.TransformIn
 import java.io.IOException;
 import java.io.InputStream;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collection;
-import java.util.LinkedHashSet;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
 
+import static org.elasticsearch.index.mapper.MapperService.SINGLE_MAPPING_NAME;
 import static org.elasticsearch.xpack.core.ClientHelper.TRANSFORM_ORIGIN;
 import static org.elasticsearch.xpack.core.ClientHelper.executeAsyncWithOrigin;
 
@@ -89,11 +103,21 @@ import static org.elasticsearch.xpack.core.ClientHelper.executeAsyncWithOrigin;
 public class IndexBasedTransformConfigManager implements TransformConfigManager {
 
     private static final Logger logger = LogManager.getLogger(IndexBasedTransformConfigManager.class);
+    private static final int MAX_RESULTS_WINDOW = 10_000;
 
+    private final ClusterService clusterService;
+    private final IndexNameExpressionResolver indexNameExpressionResolver;
     private final Client client;
     private final NamedXContentRegistry xContentRegistry;
 
-    public IndexBasedTransformConfigManager(Client client, NamedXContentRegistry xContentRegistry) {
+    public IndexBasedTransformConfigManager(
+        ClusterService clusterService,
+        IndexNameExpressionResolver indexNameExpressionResolver,
+        Client client,
+        NamedXContentRegistry xContentRegistry
+    ) {
+        this.clusterService = clusterService;
+        this.indexNameExpressionResolver = indexNameExpressionResolver;
         this.client = client;
         this.xContentRegistry = xContentRegistry;
     }
@@ -146,16 +170,18 @@ public class IndexBasedTransformConfigManager implements TransformConfigManager 
 
     @Override
     public void deleteOldTransformConfigurations(String transformId, ActionListener<Boolean> listener) {
-        DeleteByQueryRequest deleteByQueryRequest = new DeleteByQueryRequest(
+        DeleteByQueryRequest deleteByQueryRequest = createDeleteByQueryRequest();
+        deleteByQueryRequest.indices(
             TransformInternalIndexConstants.INDEX_NAME_PATTERN,
             TransformInternalIndexConstants.INDEX_NAME_PATTERN_DEPRECATED
-        ).setQuery(
+        );
+        deleteByQueryRequest.setQuery(
             QueryBuilders.constantScoreQuery(
                 QueryBuilders.boolQuery()
                     .mustNot(QueryBuilders.termQuery("_index", TransformInternalIndexConstants.LATEST_INDEX_NAME))
                     .filter(QueryBuilders.termQuery("_id", TransformConfig.documentId(transformId)))
             )
-        ).setIndicesOptions(IndicesOptions.lenientExpandOpen());
+        );
 
         executeAsyncWithOrigin(
             client,
@@ -176,18 +202,19 @@ public class IndexBasedTransformConfigManager implements TransformConfigManager 
     }
 
     @Override
-    public void deleteOldTransformStoredDocuments(String transformId, ActionListener<Boolean> listener) {
-        DeleteByQueryRequest deleteByQueryRequest = new DeleteByQueryRequest(
+    public void deleteOldTransformStoredDocuments(String transformId, ActionListener<Long> listener) {
+        DeleteByQueryRequest deleteByQueryRequest = createDeleteByQueryRequest();
+        deleteByQueryRequest.indices(
             TransformInternalIndexConstants.INDEX_NAME_PATTERN,
             TransformInternalIndexConstants.INDEX_NAME_PATTERN_DEPRECATED
-        ).setQuery(
+        );
+        deleteByQueryRequest.setQuery(
             QueryBuilders.constantScoreQuery(
                 QueryBuilders.boolQuery()
                     .mustNot(QueryBuilders.termQuery("_index", TransformInternalIndexConstants.LATEST_INDEX_NAME))
                     .filter(QueryBuilders.termQuery("_id", TransformStoredDoc.documentId(transformId)))
             )
-        ).setIndicesOptions(IndicesOptions.lenientExpandOpen());
-
+        );
         executeAsyncWithOrigin(
             client,
             TRANSFORM_ORIGIN,
@@ -201,9 +228,92 @@ public class IndexBasedTransformConfigManager implements TransformConfigManager 
                     );
                     return;
                 }
-                listener.onResponse(true);
+                listener.onResponse(response.getDeleted());
             }, listener::onFailure)
         );
+    }
+
+    @Override
+    public void deleteOldCheckpoints(String transformId, long deleteCheckpointsBelow, long deleteOlderThan, ActionListener<Long> listener) {
+        DeleteByQueryRequest deleteByQueryRequest = createDeleteByQueryRequest();
+        deleteByQueryRequest.indices(
+            TransformInternalIndexConstants.INDEX_NAME_PATTERN,
+            TransformInternalIndexConstants.INDEX_NAME_PATTERN_DEPRECATED
+        );
+        deleteByQueryRequest.setQuery(
+            QueryBuilders.boolQuery()
+                .filter(QueryBuilders.termQuery(TransformField.ID.getPreferredName(), transformId))
+                .filter(QueryBuilders.termQuery(TransformField.INDEX_DOC_TYPE.getPreferredName(), TransformCheckpoint.NAME))
+                .filter(QueryBuilders.rangeQuery(TransformCheckpoint.CHECKPOINT.getPreferredName()).lt(deleteCheckpointsBelow))
+                .filter(
+                    QueryBuilders.rangeQuery(TransformField.TIMESTAMP_MILLIS.getPreferredName()).lt(deleteOlderThan).format("epoch_millis")
+                )
+        );
+        logger.debug("Deleting old checkpoints using {}", deleteByQueryRequest.getSearchRequest());
+        executeAsyncWithOrigin(
+            client,
+            TRANSFORM_ORIGIN,
+            DeleteByQueryAction.INSTANCE,
+            deleteByQueryRequest,
+            ActionListener.wrap(response -> {
+                if ((response.getBulkFailures().isEmpty() && response.getSearchFailures().isEmpty()) == false) {
+                    Tuple<RestStatus, Throwable> statusAndReason = getStatusAndReason(response);
+                    listener.onFailure(
+                        new ElasticsearchStatusException(statusAndReason.v2().getMessage(), statusAndReason.v1(), statusAndReason.v2())
+                    );
+                    return;
+                }
+                listener.onResponse(response.getDeleted());
+            }, listener::onFailure)
+        );
+    }
+
+    @Override
+    public void deleteOldIndices(ActionListener<Boolean> listener) {
+        ClusterState state = clusterService.state();
+        Set<String> indicesToDelete = new HashSet<>();
+
+        // use the transform context as we access system indexes
+        try (ThreadContext.StoredContext ctx = client.threadPool().getThreadContext().stashWithOrigin(TRANSFORM_ORIGIN)) {
+            indicesToDelete.addAll(
+                Arrays.asList(
+                    indexNameExpressionResolver.concreteIndexNames(
+                        state,
+                        IndicesOptions.lenientExpandHidden(),
+                        TransformInternalIndexConstants.INDEX_NAME_PATTERN
+                    )
+                )
+            );
+
+            indicesToDelete.addAll(
+                Arrays.asList(
+                    indexNameExpressionResolver.concreteIndexNames(
+                        state,
+                        IndicesOptions.lenientExpandHidden(),
+                        TransformInternalIndexConstants.INDEX_NAME_PATTERN_DEPRECATED
+                    )
+                )
+            );
+
+            indicesToDelete.remove(TransformInternalIndexConstants.LATEST_INDEX_VERSIONED_NAME);
+        }
+
+        if (indicesToDelete.isEmpty()) {
+            listener.onResponse(true);
+            return;
+        }
+
+        DeleteIndexRequest deleteRequest = new DeleteIndexRequest(indicesToDelete.toArray(new String[0])).indicesOptions(
+            IndicesOptions.LENIENT_EXPAND_OPEN
+        );
+
+        executeAsyncWithOrigin(client, TRANSFORM_ORIGIN, DeleteIndexAction.INSTANCE, deleteRequest, ActionListener.wrap(response -> {
+            if (response.isAcknowledged() == false) {
+                listener.onFailure(new ElasticsearchStatusException("Failed to delete internal indices", RestStatus.INTERNAL_SERVER_ERROR));
+                return;
+            }
+            listener.onResponse(true);
+        }, listener::onFailure));
     }
 
     private void putTransformConfiguration(
@@ -284,6 +394,55 @@ public class IndexBasedTransformConfigManager implements TransformConfigManager 
     }
 
     @Override
+    public void getTransformCheckpointForUpdate(
+        String transformId,
+        long checkpoint,
+        ActionListener<Tuple<TransformCheckpoint, SeqNoPrimaryTermAndIndex>> checkpointAndVersionListener
+    ) {
+        QueryBuilder queryBuilder = QueryBuilders.termQuery("_id", TransformCheckpoint.documentId(transformId, checkpoint));
+        SearchRequest searchRequest = client.prepareSearch(
+            TransformInternalIndexConstants.INDEX_NAME_PATTERN,
+            TransformInternalIndexConstants.INDEX_NAME_PATTERN_DEPRECATED
+        )
+            .setQuery(queryBuilder)
+            // use sort to get the last
+            .addSort("_index", SortOrder.DESC)
+            .setSize(1)
+            .seqNoAndPrimaryTerm(true)
+            .setAllowPartialSearchResults(false)
+            .request();
+
+        executeAsyncWithOrigin(
+            client,
+            TRANSFORM_ORIGIN,
+            SearchAction.INSTANCE,
+            searchRequest,
+            ActionListener.<SearchResponse>wrap(searchResponse -> {
+                if (searchResponse.getHits().getHits().length == 0) {
+                    // do not fail, this _must_ be handled by the caller
+                    checkpointAndVersionListener.onResponse(null);
+                    return;
+                }
+                SearchHit hit = searchResponse.getHits().getHits()[0];
+                BytesReference source = searchResponse.getHits().getHits()[0].getSourceRef();
+                parseCheckpointsLenientlyFromSource(
+                    source,
+                    transformId,
+                    ActionListener.wrap(
+                        parsedCheckpoint -> checkpointAndVersionListener.onResponse(
+                            Tuple.tuple(
+                                parsedCheckpoint,
+                                new SeqNoPrimaryTermAndIndex(hit.getSeqNo(), hit.getPrimaryTerm(), hit.getIndex())
+                            )
+                        ),
+                        checkpointAndVersionListener::onFailure
+                    )
+                );
+            }, checkpointAndVersionListener::onFailure)
+        );
+    }
+
+    @Override
     public void getTransformConfiguration(String transformId, ActionListener<TransformConfig> resultListener) {
         QueryBuilder queryBuilder = QueryBuilders.termQuery("_id", TransformConfig.documentId(transformId));
         SearchRequest searchRequest = client.prepareSearch(
@@ -360,7 +519,7 @@ public class IndexBasedTransformConfigManager implements TransformConfigManager 
         String transformIdsExpression,
         PageParams pageParams,
         boolean allowNoMatch,
-        ActionListener<Tuple<Long, List<String>>> foundIdsListener
+        ActionListener<Tuple<Long, Tuple<List<String>, List<TransformConfig>>>> foundConfigsListener
     ) {
         String[] idTokens = ExpandedIdsMatcher.tokenizeExpression(transformIdsExpression);
         QueryBuilder queryBuilder = buildQueryFromTokenizedIds(idTokens, TransformConfig.NAME);
@@ -370,12 +529,11 @@ public class IndexBasedTransformConfigManager implements TransformConfigManager 
             TransformInternalIndexConstants.INDEX_NAME_PATTERN_DEPRECATED
         )
             .addSort(TransformField.ID.getPreferredName(), SortOrder.ASC)
+            .addSort("_index", SortOrder.DESC)
             .setFrom(pageParams.getFrom())
             .setTrackTotalHits(true)
             .setSize(pageParams.getSize())
             .setQuery(queryBuilder)
-            // We only care about the `id` field, small optimization
-            .setFetchSource(TransformField.ID.getPreferredName(), "")
             .request();
 
         final ExpandedIdsMatcher requiredMatches = new ExpandedIdsMatcher(idTokens, allowNoMatch);
@@ -387,41 +545,106 @@ public class IndexBasedTransformConfigManager implements TransformConfigManager 
             ActionListener.<SearchResponse>wrap(searchResponse -> {
                 long totalHits = searchResponse.getHits().getTotalHits().value;
                 // important: preserve order
-                Set<String> ids = new LinkedHashSet<>(searchResponse.getHits().getHits().length);
+                Set<String> ids = Sets.newLinkedHashSetWithExpectedSize(searchResponse.getHits().getHits().length);
+                Set<TransformConfig> configs = Sets.newLinkedHashSetWithExpectedSize(searchResponse.getHits().getHits().length);
                 for (SearchHit hit : searchResponse.getHits().getHits()) {
                     BytesReference source = hit.getSourceRef();
                     try (
                         InputStream stream = source.streamInput();
                         XContentParser parser = XContentFactory.xContent(XContentType.JSON)
-                            .createParser(NamedXContentRegistry.EMPTY, LoggingDeprecationHandler.INSTANCE, stream)
+                            .createParser(xContentRegistry, LoggingDeprecationHandler.INSTANCE, stream)
                     ) {
-                        ids.add((String) parser.map().get(TransformField.ID.getPreferredName()));
+                        TransformConfig config = TransformConfig.fromXContent(parser, null, true);
+                        if (ids.add(config.getId())) {
+                            configs.add(config);
+                        }
                     } catch (IOException e) {
-                        foundIdsListener.onFailure(new ElasticsearchParseException("failed to parse search hit for ids", e));
+                        foundConfigsListener.onFailure(new ElasticsearchParseException("failed to parse search hit for ids", e));
                         return;
                     }
                 }
                 requiredMatches.filterMatchedIds(ids);
                 if (requiredMatches.hasUnmatchedIds()) {
                     // some required Ids were not found
-                    foundIdsListener.onFailure(
+                    foundConfigsListener.onFailure(
                         new ResourceNotFoundException(
                             TransformMessages.getMessage(TransformMessages.REST_UNKNOWN_TRANSFORM, requiredMatches.unmatchedIdsString())
                         )
                     );
                     return;
                 }
-                foundIdsListener.onResponse(new Tuple<>(totalHits, new ArrayList<>(ids)));
-            }, foundIdsListener::onFailure),
+                // if only exact ids have been given, take the count from docs to avoid potential duplicates
+                // in versioned indexes (like transform)
+                if (requiredMatches.isOnlyExact()) {
+                    foundConfigsListener.onResponse(
+                        new Tuple<>((long) ids.size(), Tuple.tuple(new ArrayList<>(ids), new ArrayList<>(configs)))
+                    );
+                } else {
+                    foundConfigsListener.onResponse(new Tuple<>(totalHits, Tuple.tuple(new ArrayList<>(ids), new ArrayList<>(configs))));
+                }
+            }, foundConfigsListener::onFailure),
             client::search
         );
     }
 
     @Override
+    public void getAllTransformIds(ActionListener<Set<String>> listener) {
+        expandAllTransformIds(false, MAX_RESULTS_WINDOW, ActionListener.wrap(r -> listener.onResponse(r.v2()), listener::onFailure));
+    }
+
+    @Override
+    public void getAllOutdatedTransformIds(ActionListener<Tuple<Long, Set<String>>> listener) {
+        expandAllTransformIds(true, MAX_RESULTS_WINDOW, listener);
+    }
+
+    @Override
+    public void resetTransform(String transformId, ActionListener<Boolean> listener) {
+        ActionListener<BulkByScrollResponse> deleteListener = ActionListener.wrap(dbqResponse -> { listener.onResponse(true); }, e -> {
+            if (e.getClass() == IndexNotFoundException.class) {
+                listener.onFailure(
+                    new ResourceNotFoundException(TransformMessages.getMessage(TransformMessages.REST_UNKNOWN_TRANSFORM, transformId))
+                );
+            } else {
+                listener.onFailure(e);
+            }
+        });
+
+        SearchRequest searchRequest = new SearchRequest().indices(
+            TransformInternalIndexConstants.INDEX_NAME_PATTERN,
+            TransformInternalIndexConstants.INDEX_NAME_PATTERN_DEPRECATED
+        )
+            .source(
+                new SearchSourceBuilder()
+                    // find and count all the documents corresponding to the given transform id
+                    .query(QueryBuilders.termQuery(TransformField.ID.getPreferredName(), transformId))
+                    .trackTotalHitsUpTo(1)
+            );
+        executeAsyncWithOrigin(client, TRANSFORM_ORIGIN, SearchAction.INSTANCE, searchRequest, ActionListener.wrap(searchResponse -> {
+            if (searchResponse.getHits().getTotalHits().value == 0) {
+                listener.onFailure(
+                    new ResourceNotFoundException(TransformMessages.getMessage(TransformMessages.REST_UNKNOWN_TRANSFORM, transformId))
+                );
+                return;
+            }
+
+            QueryBuilder dbqQuery = QueryBuilders.constantScoreQuery(
+                QueryBuilders.boolQuery()
+                    // delete documents corresponding to given transform id...
+                    .filter(QueryBuilders.termQuery(TransformField.ID.getPreferredName(), transformId))
+                    // ...except given transform's config document
+                    .mustNot(QueryBuilders.termQuery("_id", TransformConfig.documentId(transformId)))
+            );
+            DeleteByQueryRequest dbqRequest = createDeleteByQueryRequest().indices(
+                TransformInternalIndexConstants.INDEX_NAME_PATTERN,
+                TransformInternalIndexConstants.INDEX_NAME_PATTERN_DEPRECATED
+            ).setQuery(dbqQuery).setRefresh(true);
+            executeAsyncWithOrigin(client, TRANSFORM_ORIGIN, DeleteByQueryAction.INSTANCE, dbqRequest, deleteListener);
+        }, deleteListener::onFailure));
+    }
+
+    @Override
     public void deleteTransform(String transformId, ActionListener<Boolean> listener) {
-        DeleteByQueryRequest request = new DeleteByQueryRequest().setAbortOnVersionConflict(false); // since these documents are not
-                                                                                                    // updated, a conflict just means it was
-                                                                                                    // deleted previously
+        DeleteByQueryRequest request = createDeleteByQueryRequest();
 
         request.indices(TransformInternalIndexConstants.INDEX_NAME_PATTERN, TransformInternalIndexConstants.INDEX_NAME_PATTERN_DEPRECATED);
         QueryBuilder query = QueryBuilders.termQuery(TransformField.ID.getPreferredName(), transformId);
@@ -459,16 +682,20 @@ public class IndexBasedTransformConfigManager implements TransformConfigManager 
             IndexRequest indexRequest = new IndexRequest(TransformInternalIndexConstants.LATEST_INDEX_NAME).setRefreshPolicy(
                 WriteRequest.RefreshPolicy.IMMEDIATE
             ).id(TransformStoredDoc.documentId(storedDoc.getId())).source(source);
-            if (seqNoPrimaryTermAndIndex != null
-                && seqNoPrimaryTermAndIndex.getIndex().equals(TransformInternalIndexConstants.LATEST_INDEX_NAME)) {
-                indexRequest.opType(DocWriteRequest.OpType.INDEX)
-                    .setIfSeqNo(seqNoPrimaryTermAndIndex.getSeqNo())
-                    .setIfPrimaryTerm(seqNoPrimaryTermAndIndex.getPrimaryTerm());
+            if (seqNoPrimaryTermAndIndex != null) {
+                // if seqNoPrimaryTermAndIndex is set, use optype index even if not on the latest index, because the upgrader
+                // could have been called, see gh#80073
+                indexRequest.opType(DocWriteRequest.OpType.INDEX);
+                // if on the latest index use optimistic concurrency control in addition
+                if (seqNoPrimaryTermAndIndex.getIndex().equals(TransformInternalIndexConstants.LATEST_INDEX_NAME)) {
+                    indexRequest.setIfSeqNo(seqNoPrimaryTermAndIndex.getSeqNo())
+                        .setIfPrimaryTerm(seqNoPrimaryTermAndIndex.getPrimaryTerm());
+                }
             } else {
-                // If the index is NOT the latest or we are null, that means we have not created this doc before
-                // so, it should be a create option without the seqNo and primaryTerm set
+                // we have not created this doc before or we are called from the upgrader
                 indexRequest.opType(DocWriteRequest.OpType.CREATE);
             }
+
             executeAsyncWithOrigin(
                 client,
                 TRANSFORM_ORIGIN,
@@ -498,6 +725,7 @@ public class IndexBasedTransformConfigManager implements TransformConfigManager 
     @Override
     public void getTransformStoredDoc(
         String transformId,
+        boolean allowNoMatch,
         ActionListener<Tuple<TransformStoredDoc, SeqNoPrimaryTermAndIndex>> resultListener
     ) {
         QueryBuilder queryBuilder = QueryBuilders.termQuery("_id", TransformStoredDoc.documentId(transformId));
@@ -520,9 +748,15 @@ public class IndexBasedTransformConfigManager implements TransformConfigManager 
             searchRequest,
             ActionListener.<SearchResponse>wrap(searchResponse -> {
                 if (searchResponse.getHits().getHits().length == 0) {
-                    resultListener.onFailure(
-                        new ResourceNotFoundException(TransformMessages.getMessage(TransformMessages.UNKNOWN_TRANSFORM_STATS, transformId))
-                    );
+                    if (allowNoMatch) {
+                        resultListener.onResponse(null);
+                    } else {
+                        resultListener.onFailure(
+                            new ResourceNotFoundException(
+                                TransformMessages.getMessage(TransformMessages.UNKNOWN_TRANSFORM_STATS, transformId)
+                            )
+                        );
+                    }
                     return;
                 }
                 SearchHit searchHit = searchResponse.getHits().getHits()[0];
@@ -596,6 +830,17 @@ public class IndexBasedTransformConfigManager implements TransformConfigManager 
         );
     }
 
+    @Override
+    public void refresh(ActionListener<Boolean> listener) {
+        executeAsyncWithOrigin(
+            client.threadPool().getThreadContext(),
+            TRANSFORM_ORIGIN,
+            new RefreshRequest(TransformInternalIndexConstants.LATEST_INDEX_NAME),
+            ActionListener.<RefreshResponse>wrap(r -> listener.onResponse(true), listener::onFailure),
+            client.admin().indices()::refresh
+        );
+    }
+
     private void parseTransformLenientlyFromSource(
         BytesReference source,
         String transformId,
@@ -654,6 +899,91 @@ public class IndexBasedTransformConfigManager implements TransformConfigManager 
         return QueryBuilders.constantScoreQuery(queryBuilder);
     }
 
+    /**
+     * Expand all transform ids
+     *
+     * @param filterForOutdated if true, only returns outdated ids (after de-duplication)
+     * @param maxResultWindow the max result window size (exposed for testing)
+     * @param listener listener to call containing transform ids
+     */
+    void expandAllTransformIds(boolean filterForOutdated, int maxResultWindow, ActionListener<Tuple<Long, Set<String>>> listener) {
+        PageParams startPage = new PageParams(0, maxResultWindow);
+
+        Set<String> collectedIds = new HashSet<>();
+        recursiveExpandAllTransformIds(collectedIds, 0, filterForOutdated, maxResultWindow, null, startPage, listener);
+    }
+
+    private void recursiveExpandAllTransformIds(
+        Set<String> collectedIds,
+        long total,
+        boolean filterForOutdated,
+        int maxResultWindow,
+        String lastId,
+        PageParams page,
+        ActionListener<Tuple<Long, Set<String>>> listener
+    ) {
+        SearchRequest request = client.prepareSearch(
+            TransformInternalIndexConstants.INDEX_NAME_PATTERN,
+            TransformInternalIndexConstants.INDEX_NAME_PATTERN_DEPRECATED
+        )
+            .addSort(TransformField.ID.getPreferredName(), SortOrder.ASC)
+            .addSort("_index", SortOrder.DESC)
+            .setFrom(page.getFrom())
+            .setSize(page.getSize())
+            .setFetchSource(false)
+            .addDocValueField(TransformField.ID.getPreferredName())
+            .setQuery(
+                QueryBuilders.boolQuery()
+                    .filter(QueryBuilders.termQuery(TransformField.INDEX_DOC_TYPE.getPreferredName(), TransformConfig.NAME))
+            )
+            .request();
+
+        executeAsyncWithOrigin(
+            client.threadPool().getThreadContext(),
+            TRANSFORM_ORIGIN,
+            request,
+            ActionListener.<SearchResponse>wrap(searchResponse -> {
+                long totalHits = total;
+                String idOfLastHit = lastId;
+
+                for (SearchHit hit : searchResponse.getHits().getHits()) {
+                    String id = hit.field(TransformField.ID.getPreferredName()).getValue();
+
+                    // paranoia
+                    if (Strings.isNullOrEmpty(id)) {
+                        continue;
+                    }
+
+                    // only count hits if looking for outdated transforms
+                    if (filterForOutdated && hit.getIndex().equals(TransformInternalIndexConstants.LATEST_INDEX_VERSIONED_NAME)) {
+                        ++totalHits;
+                    } else if (id.equals(idOfLastHit) == false && collectedIds.add(id)) {
+                        ++totalHits;
+                    }
+                    idOfLastHit = id;
+                }
+
+                if (searchResponse.getHits().getHits().length == page.getSize()) {
+                    PageParams nextPage = new PageParams(page.getFrom() + page.getSize(), maxResultWindow);
+
+                    recursiveExpandAllTransformIds(
+                        collectedIds,
+                        totalHits,
+                        filterForOutdated,
+                        maxResultWindow,
+                        idOfLastHit,
+                        nextPage,
+                        listener
+                    );
+                    return;
+                }
+
+                listener.onResponse(new Tuple<>(totalHits, collectedIds));
+            }, listener::onFailure),
+            client::search
+        );
+    }
+
     private static Tuple<RestStatus, Throwable> getStatusAndReason(final BulkByScrollResponse response) {
         RestStatus status = RestStatus.OK;
         Throwable reason = new Exception("Unknown error");
@@ -674,5 +1004,23 @@ public class IndexBasedTransformConfigManager implements TransformConfigManager 
             }
         }
         return new Tuple<>(status, reason);
+    }
+
+    /**
+     * Create DBQ request with good defaults
+     *
+     * @return new DeleteByQueryRequest with some defaults set
+     */
+    private static DeleteByQueryRequest createDeleteByQueryRequest() {
+
+        DeleteByQueryRequest deleteByQuery = new DeleteByQueryRequest();
+
+        deleteByQuery.setAbortOnVersionConflict(false)
+            .setSlices(AbstractBulkByScrollRequest.AUTO_SLICES)
+            .setIndicesOptions(IndicesOptions.lenientExpandOpen());
+
+        // disable scoring by using index order
+        deleteByQuery.getSearchRequest().source().sort(SINGLE_MAPPING_NAME);
+        return deleteByQuery;
     }
 }

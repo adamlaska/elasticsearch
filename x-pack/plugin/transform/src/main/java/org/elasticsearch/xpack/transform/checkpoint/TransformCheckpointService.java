@@ -1,7 +1,8 @@
 /*
  * Copyright Elasticsearch B.V. and/or licensed to Elasticsearch B.V. under one
- * or more contributor license agreements. Licensed under the Elastic License;
- * you may not use this file except in compliance with the Elastic License.
+ * or more contributor license agreements. Licensed under the Elastic License
+ * 2.0; you may not use this file except in compliance with the Elastic License
+ * 2.0.
  */
 
 package org.elasticsearch.xpack.transform.checkpoint;
@@ -9,14 +10,18 @@ package org.elasticsearch.xpack.transform.checkpoint;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.elasticsearch.action.ActionListener;
-import org.elasticsearch.client.Client;
+import org.elasticsearch.client.internal.Client;
+import org.elasticsearch.cluster.service.ClusterService;
+import org.elasticsearch.common.settings.Settings;
 import org.elasticsearch.xpack.core.transform.transforms.TimeSyncConfig;
-import org.elasticsearch.xpack.core.transform.transforms.TransformCheckpointingInfo;
+import org.elasticsearch.xpack.core.transform.transforms.TransformCheckpointingInfo.TransformCheckpointingInfoBuilder;
 import org.elasticsearch.xpack.core.transform.transforms.TransformConfig;
 import org.elasticsearch.xpack.core.transform.transforms.TransformIndexerPosition;
 import org.elasticsearch.xpack.core.transform.transforms.TransformProgress;
 import org.elasticsearch.xpack.transform.notifications.TransformAuditor;
 import org.elasticsearch.xpack.transform.persistence.TransformConfigManager;
+
+import java.time.Clock;
 
 /**
  * Transform Checkpoint Service
@@ -30,26 +35,44 @@ public class TransformCheckpointService {
 
     private static final Logger logger = LogManager.getLogger(TransformCheckpointService.class);
 
-    private final Client client;
+    private final Clock clock;
     private final TransformConfigManager transformConfigManager;
     private final TransformAuditor transformAuditor;
+    private final RemoteClusterResolver remoteClusterResolver;
 
     public TransformCheckpointService(
-        final Client client,
+        final Clock clock,
+        final Settings settings,
+        final ClusterService clusterService,
         final TransformConfigManager transformConfigManager,
         TransformAuditor transformAuditor
     ) {
-        this.client = client;
+        this.clock = clock;
         this.transformConfigManager = transformConfigManager;
         this.transformAuditor = transformAuditor;
+        this.remoteClusterResolver = new RemoteClusterResolver(settings, clusterService.getClusterSettings());
     }
 
-    public CheckpointProvider getCheckpointProvider(final TransformConfig transformConfig) {
+    public CheckpointProvider getCheckpointProvider(final Client client, final TransformConfig transformConfig) {
         if (transformConfig.getSyncConfig() instanceof TimeSyncConfig) {
-            return new TimeBasedCheckpointProvider(client, transformConfigManager, transformAuditor, transformConfig);
+            return new TimeBasedCheckpointProvider(
+                clock,
+                client,
+                remoteClusterResolver,
+                transformConfigManager,
+                transformAuditor,
+                transformConfig
+            );
         }
 
-        return new DefaultCheckpointProvider(client, transformConfigManager, transformAuditor, transformConfig);
+        return new DefaultCheckpointProvider(
+            clock,
+            client,
+            remoteClusterResolver,
+            transformConfigManager,
+            transformAuditor,
+            transformConfig
+        );
     }
 
     /**
@@ -62,16 +85,17 @@ public class TransformCheckpointService {
      * @param listener listener to retrieve the result
      */
     public void getCheckpointingInfo(
+        final Client client,
         final String transformId,
         final long lastCheckpointNumber,
         final TransformIndexerPosition nextCheckpointPosition,
         final TransformProgress nextCheckpointProgress,
-        final ActionListener<TransformCheckpointingInfo> listener
+        final ActionListener<TransformCheckpointingInfoBuilder> listener
     ) {
 
         // we need to retrieve the config first before we can defer the rest to the corresponding provider
         transformConfigManager.getTransformConfiguration(transformId, ActionListener.wrap(transformConfig -> {
-            getCheckpointProvider(transformConfig).getCheckpointingInfo(
+            getCheckpointProvider(client, transformConfig).getCheckpointingInfo(
                 lastCheckpointNumber,
                 nextCheckpointPosition,
                 nextCheckpointProgress,
@@ -82,5 +106,4 @@ public class TransformCheckpointService {
             listener.onFailure(new CheckpointException("Failed to retrieve configuration", transformError));
         }));
     }
-
 }

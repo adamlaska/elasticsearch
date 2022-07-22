@@ -1,20 +1,9 @@
 /*
- * Licensed to Elasticsearch under one or more contributor
- * license agreements. See the NOTICE file distributed with
- * this work for additional information regarding copyright
- * ownership. Elasticsearch licenses this file to you under
- * the Apache License, Version 2.0 (the "License"); you may
- * not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *    http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing,
- * software distributed under the License is distributed on an
- * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
- * KIND, either express or implied.  See the License for the
- * specific language governing permissions and limitations
- * under the License.
+ * Copyright Elasticsearch B.V. and/or licensed to Elasticsearch B.V. under one
+ * or more contributor license agreements. Licensed under the Elastic License
+ * 2.0 and the Server Side Public License, v 1; you may not use this file except
+ * in compliance with, at your election, the Elastic License 2.0 or the Server
+ * Side Public License, v 1.
  */
 
 package org.elasticsearch.client;
@@ -41,35 +30,30 @@ import org.elasticsearch.action.get.GetRequest;
 import org.elasticsearch.action.get.MultiGetRequest;
 import org.elasticsearch.action.index.IndexRequest;
 import org.elasticsearch.action.search.ClearScrollRequest;
+import org.elasticsearch.action.search.ClosePointInTimeRequest;
 import org.elasticsearch.action.search.MultiSearchRequest;
+import org.elasticsearch.action.search.OpenPointInTimeRequest;
 import org.elasticsearch.action.search.SearchRequest;
 import org.elasticsearch.action.search.SearchScrollRequest;
 import org.elasticsearch.action.support.ActiveShardCount;
 import org.elasticsearch.action.support.IndicesOptions;
-import org.elasticsearch.action.support.WriteRequest;
+import org.elasticsearch.action.support.WriteRequest.RefreshPolicy;
 import org.elasticsearch.action.update.UpdateRequest;
 import org.elasticsearch.client.core.CountRequest;
+import org.elasticsearch.client.core.GetSourceRequest;
 import org.elasticsearch.client.core.MultiTermVectorsRequest;
 import org.elasticsearch.client.core.TermVectorsRequest;
-import org.elasticsearch.client.indices.AnalyzeRequest;
-import org.elasticsearch.client.security.RefreshPolicy;
-import org.elasticsearch.client.tasks.TaskId;
+import org.elasticsearch.client.internal.Requests;
 import org.elasticsearch.cluster.health.ClusterHealthStatus;
-import org.elasticsearch.common.Nullable;
 import org.elasticsearch.common.Priority;
 import org.elasticsearch.common.Strings;
-import org.elasticsearch.common.SuppressForbidden;
 import org.elasticsearch.common.bytes.BytesReference;
 import org.elasticsearch.common.lucene.uid.Versions;
-import org.elasticsearch.common.unit.TimeValue;
-import org.elasticsearch.common.xcontent.DeprecationHandler;
-import org.elasticsearch.common.xcontent.NamedXContentRegistry;
-import org.elasticsearch.common.xcontent.ToXContent;
-import org.elasticsearch.common.xcontent.XContent;
-import org.elasticsearch.common.xcontent.XContentBuilder;
+import org.elasticsearch.common.util.CollectionUtils;
 import org.elasticsearch.common.xcontent.XContentHelper;
-import org.elasticsearch.common.xcontent.XContentParser;
-import org.elasticsearch.common.xcontent.XContentType;
+import org.elasticsearch.core.Nullable;
+import org.elasticsearch.core.SuppressForbidden;
+import org.elasticsearch.core.TimeValue;
 import org.elasticsearch.index.VersionType;
 import org.elasticsearch.index.rankeval.RankEvalRequest;
 import org.elasticsearch.index.reindex.AbstractBulkByScrollRequest;
@@ -81,6 +65,13 @@ import org.elasticsearch.rest.action.search.RestSearchAction;
 import org.elasticsearch.script.mustache.MultiSearchTemplateRequest;
 import org.elasticsearch.script.mustache.SearchTemplateRequest;
 import org.elasticsearch.search.fetch.subphase.FetchSourceContext;
+import org.elasticsearch.xcontent.DeprecationHandler;
+import org.elasticsearch.xcontent.NamedXContentRegistry;
+import org.elasticsearch.xcontent.ToXContent;
+import org.elasticsearch.xcontent.XContent;
+import org.elasticsearch.xcontent.XContentBuilder;
+import org.elasticsearch.xcontent.XContentParser;
+import org.elasticsearch.xcontent.XContentType;
 
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
@@ -223,14 +214,19 @@ final class RequestConverters {
                 BytesReference indexSource = indexRequest.source();
                 XContentType indexXContentType = indexRequest.getContentType();
 
-                try (XContentParser parser = XContentHelper.createParser(
+                try (
+                    XContentParser parser = XContentHelper.createParser(
                         /*
                          * EMPTY and THROW are fine here because we just call
                          * copyCurrentStructure which doesn't touch the
                          * registry or deprecation.
                          */
-                        NamedXContentRegistry.EMPTY, DeprecationHandler.THROW_UNSUPPORTED_OPERATION,
-                        indexSource, indexXContentType)) {
+                        NamedXContentRegistry.EMPTY,
+                        DeprecationHandler.THROW_UNSUPPORTED_OPERATION,
+                        indexSource,
+                        indexXContentType
+                    )
+                ) {
                     try (XContentBuilder builder = XContentBuilder.builder(bulkContentType.xContent())) {
                         builder.copyCurrentStructure(parser);
                         source = BytesReference.bytes(builder).toBytesRef();
@@ -274,15 +270,24 @@ final class RequestConverters {
         return request;
     }
 
-    static Request sourceExists(GetRequest getRequest) {
-        String endpoint = endpoint(getRequest.index(), "_source", getRequest.id());
-        Request request = new Request(HttpHead.METHOD_NAME, endpoint);
+    static Request sourceExists(GetSourceRequest getSourceRequest) {
+        return sourceRequest(getSourceRequest, HttpHead.METHOD_NAME);
+    }
+
+    static Request getSource(GetSourceRequest getSourceRequest) {
+        return sourceRequest(getSourceRequest, HttpGet.METHOD_NAME);
+    }
+
+    private static Request sourceRequest(GetSourceRequest getSourceRequest, String httpMethodName) {
         Params parameters = new Params();
-        parameters.withPreference(getRequest.preference());
-        parameters.withRouting(getRequest.routing());
-        parameters.withRefresh(getRequest.refresh());
-        parameters.withRealtime(getRequest.realtime());
-        // Version params are not currently supported by the source exists API so are not passed
+        parameters.withPreference(getSourceRequest.preference());
+        parameters.withRouting(getSourceRequest.routing());
+        parameters.withRefresh(getSourceRequest.refresh());
+        parameters.withRealtime(getSourceRequest.realtime());
+        parameters.withFetchSourceContext(getSourceRequest.fetchSourceContext());
+
+        String endpoint = endpoint(getSourceRequest.index(), "_source", getSourceRequest.id());
+        Request request = new Request(httpMethodName, endpoint);
         request.addParameters(parameters.asMap());
         return request;
     }
@@ -321,6 +326,7 @@ final class RequestConverters {
         parameters.withPipeline(indexRequest.getPipeline());
         parameters.withRefreshPolicy(indexRequest.getRefreshPolicy());
         parameters.withWaitForActiveShards(indexRequest.waitForActiveShards());
+        parameters.withRequireAlias(indexRequest.isRequireAlias());
 
         BytesRef source = indexRequest.source().toBytesRef();
         ContentType contentType = createContentType(indexRequest.getContentType());
@@ -347,6 +353,7 @@ final class RequestConverters {
         parameters.withRetryOnConflict(updateRequest.retryOnConflict());
         parameters.withVersion(updateRequest.version());
         parameters.withVersionType(updateRequest.versionType());
+        parameters.withRequireAlias(updateRequest.isRequireAlias());
 
         // The Java API allows update requests with different content types
         // set for the partial document and the upsert document. This client
@@ -359,8 +366,14 @@ final class RequestConverters {
         if (updateRequest.upsertRequest() != null) {
             XContentType upsertContentType = updateRequest.upsertRequest().getContentType();
             if ((xContentType != null) && (xContentType != upsertContentType)) {
-                throw new IllegalStateException("Update request cannot have different content types for doc [" + xContentType + "]" +
-                        " and upsert [" + upsertContentType + "] documents");
+                throw new IllegalStateException(
+                    "Update request cannot have different content types for doc ["
+                        + xContentType
+                        + "]"
+                        + " and upsert ["
+                        + upsertContentType
+                        + "] documents"
+                );
             } else {
                 xContentType = upsertContentType;
             }
@@ -393,20 +406,28 @@ final class RequestConverters {
         return request;
     }
 
-    private static void addSearchRequestParams(Params params, SearchRequest searchRequest) {
+    static void addSearchRequestParams(Params params, SearchRequest searchRequest) {
         params.putParam(RestSearchAction.TYPED_KEYS_PARAM, "true");
         params.withRouting(searchRequest.routing());
         params.withPreference(searchRequest.preference());
-        params.withIndicesOptions(searchRequest.indicesOptions());
-        params.putParam("search_type", searchRequest.searchType().name().toLowerCase(Locale.ROOT));
-        params.putParam("ccs_minimize_roundtrips", Boolean.toString(searchRequest.isCcsMinimizeRoundtrips()));
+        if (SearchRequest.DEFAULT_INDICES_OPTIONS.equals(searchRequest.indicesOptions()) == false) {
+            params.withIndicesOptions(searchRequest.indicesOptions());
+        }
+        params.withSearchType(searchRequest.searchType().name().toLowerCase(Locale.ROOT));
+        if (searchRequest.isCcsMinimizeRoundtrips() != SearchRequest.defaultCcsMinimizeRoundtrips(searchRequest)) {
+            params.putParam("ccs_minimize_roundtrips", Boolean.toString(searchRequest.isCcsMinimizeRoundtrips()));
+        }
+        if (searchRequest.getPreFilterShardSize() != null) {
+            params.putParam("pre_filter_shard_size", Integer.toString(searchRequest.getPreFilterShardSize()));
+        }
+        params.withMaxConcurrentShardRequests(searchRequest.getMaxConcurrentShardRequests());
         if (searchRequest.requestCache() != null) {
-            params.putParam("request_cache", Boolean.toString(searchRequest.requestCache()));
+            params.withRequestCache(searchRequest.requestCache());
         }
         if (searchRequest.allowPartialSearchResults() != null) {
-            params.putParam("allow_partial_search_results", Boolean.toString(searchRequest.allowPartialSearchResults()));
+            params.withAllowPartialResults(searchRequest.allowPartialSearchResults());
         }
-        params.putParam("batched_reduce_size", Integer.toString(searchRequest.getBatchedReduceSize()));
+        params.withBatchedReduceSize(searchRequest.getBatchedReduceSize());
         if (searchRequest.scroll() != null) {
             params.putParam("scroll", searchRequest.scroll().keepAlive());
         }
@@ -421,6 +442,25 @@ final class RequestConverters {
     static Request clearScroll(ClearScrollRequest clearScrollRequest) throws IOException {
         Request request = new Request(HttpDelete.METHOD_NAME, "/_search/scroll");
         request.setEntity(createEntity(clearScrollRequest, REQUEST_BODY_CONTENT_TYPE));
+        return request;
+    }
+
+    static Request openPointInTime(OpenPointInTimeRequest openRequest) {
+        Request request = new Request(HttpPost.METHOD_NAME, endpoint(openRequest.indices(), "_pit"));
+        Params params = new Params();
+        if (OpenPointInTimeRequest.DEFAULT_INDICES_OPTIONS.equals(openRequest.indicesOptions()) == false) {
+            params.withIndicesOptions(openRequest.indicesOptions());
+        }
+        params.withRouting(openRequest.routing());
+        params.withPreference(openRequest.preference());
+        params.putParam("keep_alive", openRequest.keepAlive());
+        request.addParameters(params.asMap());
+        return request;
+    }
+
+    static Request closePointInTime(ClosePointInTimeRequest closeRequest) throws IOException {
+        Request request = new Request(HttpDelete.METHOD_NAME, "/_pit");
+        request.setEntity(createEntity(closeRequest, REQUEST_BODY_CONTENT_TYPE));
         return request;
     }
 
@@ -448,7 +488,7 @@ final class RequestConverters {
         } else {
             SearchRequest searchRequest = searchTemplateRequest.getRequest();
             String endpoint = endpoint(searchRequest.indices(), "_search/template");
-            request = new Request(HttpGet.METHOD_NAME, endpoint);
+            request = new Request(HttpPost.METHOD_NAME, endpoint);
 
             Params params = new Params();
             addSearchRequestParams(params, searchRequest);
@@ -481,10 +521,10 @@ final class RequestConverters {
         params.withRouting(countRequest.routing());
         params.withPreference(countRequest.preference());
         params.withIndicesOptions(countRequest.indicesOptions());
-        if (countRequest.terminateAfter() != 0){
+        if (countRequest.terminateAfter() != 0) {
             params.withTerminateAfter(countRequest.terminateAfter());
         }
-        if (countRequest.minScore() != null){
+        if (countRequest.minScore() != null) {
             params.putParam("min_score", String.valueOf(countRequest.minScore()));
         }
         request.addParameters(params.asMap());
@@ -506,13 +546,19 @@ final class RequestConverters {
         return request;
     }
 
-    static Request fieldCaps(FieldCapabilitiesRequest fieldCapabilitiesRequest) {
-        Request request = new Request(HttpGet.METHOD_NAME, endpoint(fieldCapabilitiesRequest.indices(), "_field_caps"));
+    static Request fieldCaps(FieldCapabilitiesRequest fieldCapabilitiesRequest) throws IOException {
+        String methodName = fieldCapabilitiesRequest.indexFilter() != null ? HttpPost.METHOD_NAME : HttpGet.METHOD_NAME;
+        Request request = new Request(methodName, endpoint(fieldCapabilitiesRequest.indices(), "_field_caps"));
 
         Params params = new Params();
         params.withFields(fieldCapabilitiesRequest.fields());
-        params.withIndicesOptions(fieldCapabilitiesRequest.indicesOptions());
+        if (FieldCapabilitiesRequest.DEFAULT_INDICES_OPTIONS.equals(fieldCapabilitiesRequest.indicesOptions()) == false) {
+            params.withIndicesOptions(fieldCapabilitiesRequest.indicesOptions());
+        }
         request.addParameters(params.asMap());
+        if (fieldCapabilitiesRequest.indexFilter() != null) {
+            request.setEntity(createEntity(fieldCapabilitiesRequest, REQUEST_BODY_CONTENT_TYPE));
+        }
         return request;
     }
 
@@ -520,7 +566,9 @@ final class RequestConverters {
         Request request = new Request(HttpGet.METHOD_NAME, endpoint(rankEvalRequest.indices(), Strings.EMPTY_ARRAY, "_rank_eval"));
 
         Params params = new Params();
-        params.withIndicesOptions(rankEvalRequest.indicesOptions());
+        if (SearchRequest.DEFAULT_INDICES_OPTIONS.equals(rankEvalRequest.indicesOptions()) == false) {
+            params.withIndicesOptions(rankEvalRequest.indicesOptions());
+        }
         params.putParam("search_type", rankEvalRequest.searchType().name().toLowerCase(Locale.ROOT));
         request.addParameters(params.asMap());
         request.setEntity(createEntity(rankEvalRequest.getRankEvalSpec(), REQUEST_BODY_CONTENT_TYPE));
@@ -531,46 +579,50 @@ final class RequestConverters {
         return prepareReindexRequest(reindexRequest, true);
     }
 
-    static Request submitReindex(ReindexRequest reindexRequest) throws IOException {
-        return prepareReindexRequest(reindexRequest, false);
+    static Request deleteByQuery(DeleteByQueryRequest deleteByQueryRequest) throws IOException {
+        return prepareDeleteByQueryRequest(deleteByQueryRequest, true);
     }
 
-    static Request submitDeleteByQuery(DeleteByQueryRequest deleteByQueryRequest) throws IOException {
-        return prepareDeleteByQueryRequest(deleteByQueryRequest, false);
+    static Request updateByQuery(UpdateByQueryRequest updateByQueryRequest) throws IOException {
+        return prepareUpdateByQueryRequest(updateByQueryRequest, true);
     }
 
     private static Request prepareReindexRequest(ReindexRequest reindexRequest, boolean waitForCompletion) throws IOException {
         String endpoint = new EndpointBuilder().addPathPart("_reindex").build();
         Request request = new Request(HttpPost.METHOD_NAME, endpoint);
-        Params params = new Params()
-            .withWaitForCompletion(waitForCompletion)
+        Params params = new Params().withWaitForCompletion(waitForCompletion)
             .withRefresh(reindexRequest.isRefresh())
             .withTimeout(reindexRequest.getTimeout())
             .withWaitForActiveShards(reindexRequest.getWaitForActiveShards())
             .withRequestsPerSecond(reindexRequest.getRequestsPerSecond())
-            .withSlices(reindexRequest.getSlices());
+            .withSlices(reindexRequest.getSlices())
+            .withRequireAlias(reindexRequest.getDestination().isRequireAlias());
 
         if (reindexRequest.getScrollTime() != null) {
             params.putParam("scroll", reindexRequest.getScrollTime());
         }
+
         request.addParameters(params.asMap());
         request.setEntity(createEntity(reindexRequest, REQUEST_BODY_CONTENT_TYPE));
         return request;
     }
 
-    private static Request prepareDeleteByQueryRequest(DeleteByQueryRequest deleteByQueryRequest,
-                                                       boolean waitForCompletion) throws IOException {
+    private static Request prepareDeleteByQueryRequest(DeleteByQueryRequest deleteByQueryRequest, boolean waitForCompletion)
+        throws IOException {
         String endpoint = endpoint(deleteByQueryRequest.indices(), "_delete_by_query");
         Request request = new Request(HttpPost.METHOD_NAME, endpoint);
-        Params params = new Params()
-            .withRouting(deleteByQueryRequest.getRouting())
+        Params params = new Params().withRouting(deleteByQueryRequest.getRouting())
             .withRefresh(deleteByQueryRequest.isRefresh())
             .withTimeout(deleteByQueryRequest.getTimeout())
             .withWaitForActiveShards(deleteByQueryRequest.getWaitForActiveShards())
             .withRequestsPerSecond(deleteByQueryRequest.getRequestsPerSecond())
-            .withIndicesOptions(deleteByQueryRequest.indicesOptions())
             .withWaitForCompletion(waitForCompletion)
             .withSlices(deleteByQueryRequest.getSlices());
+
+        if (SearchRequest.DEFAULT_INDICES_OPTIONS.equals(deleteByQueryRequest.indicesOptions()) == false) {
+            params = params.withIndicesOptions(deleteByQueryRequest.indicesOptions());
+        }
+
         if (deleteByQueryRequest.isAbortOnVersionConflict() == false) {
             params.putParam("conflicts", "proceed");
         }
@@ -588,18 +640,20 @@ final class RequestConverters {
         return request;
     }
 
-    static Request updateByQuery(UpdateByQueryRequest updateByQueryRequest) throws IOException {
+    static Request prepareUpdateByQueryRequest(UpdateByQueryRequest updateByQueryRequest, boolean waitForCompletion) throws IOException {
         String endpoint = endpoint(updateByQueryRequest.indices(), "_update_by_query");
         Request request = new Request(HttpPost.METHOD_NAME, endpoint);
-        Params params = new Params()
-            .withRouting(updateByQueryRequest.getRouting())
+        Params params = new Params().withRouting(updateByQueryRequest.getRouting())
             .withPipeline(updateByQueryRequest.getPipeline())
             .withRefresh(updateByQueryRequest.isRefresh())
             .withTimeout(updateByQueryRequest.getTimeout())
             .withWaitForActiveShards(updateByQueryRequest.getWaitForActiveShards())
             .withRequestsPerSecond(updateByQueryRequest.getRequestsPerSecond())
-            .withIndicesOptions(updateByQueryRequest.indicesOptions())
+            .withWaitForCompletion(waitForCompletion)
             .withSlices(updateByQueryRequest.getSlices());
+        if (SearchRequest.DEFAULT_INDICES_OPTIONS.equals(updateByQueryRequest.indicesOptions()) == false) {
+            params = params.withIndicesOptions(updateByQueryRequest.indicesOptions());
+        }
         if (updateByQueryRequest.isAbortOnVersionConflict() == false) {
             params.putParam("conflicts", "proceed");
         }
@@ -617,10 +671,6 @@ final class RequestConverters {
         return request;
     }
 
-    static Request deleteByQuery(DeleteByQueryRequest deleteByQueryRequest) throws IOException {
-        return prepareDeleteByQueryRequest(deleteByQueryRequest, true);
-    }
-
     static Request rethrottleReindex(RethrottleRequest rethrottleRequest) {
         return rethrottle(rethrottleRequest, "_reindex");
     }
@@ -634,11 +684,12 @@ final class RequestConverters {
     }
 
     private static Request rethrottle(RethrottleRequest rethrottleRequest, String firstPathPart) {
-        String endpoint = new EndpointBuilder().addPathPart(firstPathPart).addPathPart(rethrottleRequest.getTaskId().toString())
-                .addPathPart("_rethrottle").build();
+        String endpoint = new EndpointBuilder().addPathPart(firstPathPart)
+            .addPathPart(rethrottleRequest.getTaskId().toString())
+            .addPathPart("_rethrottle")
+            .build();
         Request request = new Request(HttpPost.METHOD_NAME, endpoint);
-        Params params = new Params()
-                .withRequestsPerSecond(rethrottleRequest.getRequestsPerSecond());
+        Params params = new Params().withRequestsPerSecond(rethrottleRequest.getRequestsPerSecond());
         // we set "group_by" to "none" because this is the response format we can parse back
         params.putParam("group_by", "none");
         request.addParameters(params.asMap());
@@ -659,18 +710,6 @@ final class RequestConverters {
         return request;
     }
 
-    static Request analyze(AnalyzeRequest request) throws IOException {
-        EndpointBuilder builder = new EndpointBuilder();
-        String index = request.index();
-        if (index != null) {
-            builder.addPathPart(index);
-        }
-        builder.addPathPartAsIs("_analyze");
-        Request req = new Request(HttpGet.METHOD_NAME, builder.build());
-        req.setEntity(createEntity(request, REQUEST_BODY_CONTENT_TYPE));
-        return req;
-    }
-
     static Request termVectors(TermVectorsRequest tvrequest) throws IOException {
         String endpoint;
         if (tvrequest.getType() != null) {
@@ -688,7 +727,6 @@ final class RequestConverters {
         Params params = new Params();
         params.withRouting(tvrequest.getRouting());
         params.withPreference(tvrequest.getPreference());
-        params.withFields(tvrequest.getFields());
         params.withRealtime(tvrequest.getRealtime());
         request.addParameters(params.asMap());
         request.setEntity(createEntity(tvrequest, REQUEST_BODY_CONTENT_TYPE));
@@ -755,13 +793,17 @@ final class RequestConverters {
 
     @Deprecated
     static String endpoint(String[] indices, String[] types, String endpoint) {
-        return new EndpointBuilder().addCommaSeparatedPathParts(indices).addCommaSeparatedPathParts(types)
-                .addPathPartAsIs(endpoint).build();
+        return new EndpointBuilder().addCommaSeparatedPathParts(indices)
+            .addCommaSeparatedPathParts(types)
+            .addPathPartAsIs(endpoint)
+            .build();
     }
 
     static String endpoint(String[] indices, String endpoint, String[] suffixes) {
-        return new EndpointBuilder().addCommaSeparatedPathParts(indices).addPathPartAsIs(endpoint)
-                .addCommaSeparatedPathParts(suffixes).build();
+        return new EndpointBuilder().addCommaSeparatedPathParts(indices)
+            .addPathPartAsIs(endpoint)
+            .addCommaSeparatedPathParts(suffixes)
+            .build();
     }
 
     @Deprecated
@@ -785,14 +827,13 @@ final class RequestConverters {
      * a {@link Request} and adds the parameters to it directly.
      */
     static class Params {
-        private final Map<String,String> parameters = new HashMap<>();
+        private final Map<String, String> parameters = new HashMap<>();
 
-        Params() {
-        }
+        Params() {}
 
         Params putParam(String name, String value) {
             if (Strings.hasLength(value)) {
-                parameters.put(name,value);
+                parameters.put(name, value);
             }
             return this;
         }
@@ -804,7 +845,7 @@ final class RequestConverters {
             return this;
         }
 
-        Map<String, String> asMap(){
+        Map<String, String> asMap() {
             return parameters;
         }
 
@@ -820,10 +861,10 @@ final class RequestConverters {
                 if (fetchSourceContext.fetchSource() == false) {
                     putParam("_source", Boolean.FALSE.toString());
                 }
-                if (fetchSourceContext.includes() != null && fetchSourceContext.includes().length > 0) {
+                if (CollectionUtils.isEmpty(fetchSourceContext.includes()) == false) {
                     putParam("_source_includes", String.join(",", fetchSourceContext.includes()));
                 }
-                if (fetchSourceContext.excludes() != null && fetchSourceContext.excludes().length > 0) {
+                if (CollectionUtils.isEmpty(fetchSourceContext.excludes()) == false) {
                     putParam("_source_excludes", String.join(",", fetchSourceContext.excludes()));
                 }
             }
@@ -831,7 +872,7 @@ final class RequestConverters {
         }
 
         Params withFields(String[] fields) {
-            if (fields != null && fields.length > 0) {
+            if (CollectionUtils.isEmpty(fields) == false) {
                 return putParam("fields", String.join(",", fields));
             }
             return this;
@@ -849,6 +890,26 @@ final class RequestConverters {
             return putParam("preference", preference);
         }
 
+        Params withSearchType(String searchType) {
+            return putParam("search_type", searchType);
+        }
+
+        Params withMaxConcurrentShardRequests(int maxConcurrentShardRequests) {
+            return putParam("max_concurrent_shard_requests", Integer.toString(maxConcurrentShardRequests));
+        }
+
+        Params withBatchedReduceSize(int batchedReduceSize) {
+            return putParam("batched_reduce_size", Integer.toString(batchedReduceSize));
+        }
+
+        Params withRequestCache(boolean requestCache) {
+            return putParam("request_cache", Boolean.toString(requestCache));
+        }
+
+        Params withAllowPartialResults(boolean allowPartialSearchResults) {
+            return putParam("allow_partial_search_results", Boolean.toString(allowPartialSearchResults));
+        }
+
         Params withRealtime(boolean realtime) {
             if (realtime == false) {
                 return putParam("realtime", Boolean.FALSE.toString());
@@ -859,18 +920,6 @@ final class RequestConverters {
         Params withRefresh(boolean refresh) {
             if (refresh) {
                 return withRefreshPolicy(RefreshPolicy.IMMEDIATE);
-            }
-            return this;
-        }
-
-        /**
-         *  @deprecated If creating a new HLRC ReST API call, use {@link RefreshPolicy}
-         *  instead of {@link WriteRequest.RefreshPolicy} from the server project
-         */
-        @Deprecated
-        Params withRefreshPolicy(WriteRequest.RefreshPolicy refreshPolicy) {
-            if (refreshPolicy != WriteRequest.RefreshPolicy.NONE) {
-                return putParam("refresh", refreshPolicy.getValue());
             }
             return this;
         }
@@ -904,17 +953,21 @@ final class RequestConverters {
         }
 
         Params withSlices(int slices) {
+            if (slices == 0) {
+                // translate to "auto" value in rest request so the receiving end doesn't throw error
+                return putParam("slices", AbstractBulkByScrollRequest.AUTO_SLICES_VALUE);
+            }
             return putParam("slices", String.valueOf(slices));
         }
 
         Params withStoredFields(String[] storedFields) {
-            if (storedFields != null && storedFields.length > 0) {
+            if (CollectionUtils.isEmpty(storedFields) == false) {
                 return putParam("stored_fields", String.join(",", storedFields));
             }
             return this;
         }
 
-        Params withTerminateAfter(int terminateAfter){
+        Params withTerminateAfter(int terminateAfter) {
             return putParam("terminate_after", String.valueOf(terminateAfter));
         }
 
@@ -957,6 +1010,13 @@ final class RequestConverters {
         Params withWaitForActiveShards(ActiveShardCount activeShardCount, ActiveShardCount defaultActiveShardCount) {
             if (activeShardCount != null && activeShardCount != defaultActiveShardCount) {
                 return putParam("wait_for_active_shards", activeShardCount.toString().toLowerCase(Locale.ROOT));
+            }
+            return this;
+        }
+
+        Params withRequireAlias(boolean requireAlias) {
+            if (requireAlias) {
+                return putParam("require_alias", Boolean.toString(requireAlias));
             }
             return this;
         }
@@ -1030,7 +1090,7 @@ final class RequestConverters {
         }
 
         Params withNodes(String[] nodes) {
-           return withNodes(Arrays.asList(nodes));
+            return withNodes(Arrays.asList(nodes));
         }
 
         Params withNodes(List<String> nodes) {
@@ -1047,34 +1107,6 @@ final class RequestConverters {
         Params withActions(List<String> actions) {
             if (actions != null && actions.size() > 0) {
                 return putParam("actions", String.join(",", actions));
-            }
-            return this;
-        }
-
-        Params withTaskId(org.elasticsearch.tasks.TaskId taskId) {
-            if (taskId != null && taskId.isSet()) {
-                return putParam("task_id", taskId.toString());
-            }
-            return this;
-        }
-
-        Params withParentTaskId(org.elasticsearch.tasks.TaskId parentTaskId) {
-            if (parentTaskId != null && parentTaskId.isSet()) {
-                return putParam("parent_task_id", parentTaskId.toString());
-            }
-            return this;
-        }
-
-        Params withTaskId(TaskId taskId) {
-            if (taskId != null && taskId.isSet()) {
-                return putParam("task_id", taskId.toString());
-            }
-            return this;
-        }
-
-        Params withParentTaskId(TaskId parentTaskId) {
-            if (parentTaskId != null && parentTaskId.isSet()) {
-                return putParam("parent_task_id", parentTaskId.toString());
             }
             return this;
         }
@@ -1124,16 +1156,24 @@ final class RequestConverters {
      */
     static XContentType enforceSameContentType(IndexRequest indexRequest, @Nullable XContentType xContentType) {
         XContentType requestContentType = indexRequest.getContentType();
-        if (requestContentType != XContentType.JSON && requestContentType != XContentType.SMILE) {
-            throw new IllegalArgumentException("Unsupported content-type found for request with content-type [" + requestContentType
-                    + "], only JSON and SMILE are supported");
+        if (requestContentType.canonical() != XContentType.JSON && requestContentType.canonical() != XContentType.SMILE) {
+            throw new IllegalArgumentException(
+                "Unsupported content-type found for request with content-type ["
+                    + requestContentType
+                    + "], only JSON and SMILE are supported"
+            );
         }
         if (xContentType == null) {
             return requestContentType;
         }
-        if (requestContentType != xContentType) {
-            throw new IllegalArgumentException("Mismatching content-type found for request with content-type [" + requestContentType
-                    + "], previous requests have content-type [" + xContentType + "]");
+        if (requestContentType.canonical() != xContentType.canonical()) {
+            throw new IllegalArgumentException(
+                "Mismatching content-type found for request with content-type ["
+                    + requestContentType
+                    + "], previous requests have content-type ["
+                    + xContentType
+                    + "]"
+            );
         }
         return xContentType;
     }
@@ -1164,7 +1204,7 @@ final class RequestConverters {
             return this;
         }
 
-        EndpointBuilder addPathPartAsIs(String ... parts) {
+        EndpointBuilder addPathPartAsIs(String... parts) {
             for (String part : parts) {
                 if (Strings.hasLength(part)) {
                     joiner.add(part);
@@ -1179,13 +1219,13 @@ final class RequestConverters {
 
         private static String encodePart(String pathPart) {
             try {
-                //encode each part (e.g. index, type and id) separately before merging them into the path
-                //we prepend "/" to the path part to make this path absolute, otherwise there can be issues with
-                //paths that start with `-` or contain `:`
-                //the authority must be an empty string and not null, else paths that being with slashes could have them
-                //misinterpreted as part of the authority.
+                // encode each part (e.g. index, type and id) separately before merging them into the path
+                // we prepend "/" to the path part to make this path absolute, otherwise there can be issues with
+                // paths that start with `-` or contain `:`
+                // the authority must be an empty string and not null, else paths that being with slashes could have them
+                // misinterpreted as part of the authority.
                 URI uri = new URI(null, "", "/" + pathPart, null, null);
-                //manually encode any slash that each part may contain
+                // manually encode any slash that each part may contain
                 return uri.getRawPath().substring(1).replaceAll("/", "%2F");
             } catch (URISyntaxException e) {
                 throw new IllegalArgumentException("Path part [" + pathPart + "] couldn't be encoded", e);
@@ -1193,4 +1233,3 @@ final class RequestConverters {
         }
     }
 }
-

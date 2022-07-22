@@ -1,7 +1,8 @@
 /*
  * Copyright Elasticsearch B.V. and/or licensed to Elasticsearch B.V. under one
- * or more contributor license agreements. Licensed under the Elastic License;
- * you may not use this file except in compliance with the Elastic License.
+ * or more contributor license agreements. Licensed under the Elastic License
+ * 2.0; you may not use this file except in compliance with the Elastic License
+ * 2.0.
  */
 package org.elasticsearch.xpack.enrich.action;
 
@@ -9,18 +10,19 @@ import org.elasticsearch.ElasticsearchStatusException;
 import org.elasticsearch.ResourceNotFoundException;
 import org.elasticsearch.action.ActionListener;
 import org.elasticsearch.action.admin.indices.delete.DeleteIndexRequest;
+import org.elasticsearch.action.admin.indices.get.GetIndexRequest;
 import org.elasticsearch.action.support.ActionFilters;
 import org.elasticsearch.action.support.IndicesOptions;
 import org.elasticsearch.action.support.master.AcknowledgedResponse;
-import org.elasticsearch.action.support.master.TransportMasterNodeAction;
-import org.elasticsearch.client.Client;
+import org.elasticsearch.action.support.master.AcknowledgedTransportMasterNodeAction;
+import org.elasticsearch.client.internal.Client;
+import org.elasticsearch.client.internal.OriginSettingClient;
 import org.elasticsearch.cluster.ClusterState;
 import org.elasticsearch.cluster.block.ClusterBlockException;
 import org.elasticsearch.cluster.block.ClusterBlockLevel;
 import org.elasticsearch.cluster.metadata.IndexNameExpressionResolver;
 import org.elasticsearch.cluster.service.ClusterService;
 import org.elasticsearch.common.inject.Inject;
-import org.elasticsearch.common.io.stream.StreamInput;
 import org.elasticsearch.ingest.IngestService;
 import org.elasticsearch.ingest.PipelineConfiguration;
 import org.elasticsearch.rest.RestStatus;
@@ -33,11 +35,13 @@ import org.elasticsearch.xpack.enrich.AbstractEnrichProcessor;
 import org.elasticsearch.xpack.enrich.EnrichPolicyLocks;
 import org.elasticsearch.xpack.enrich.EnrichStore;
 
-import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.stream.Stream;
 
-public class TransportDeleteEnrichPolicyAction extends TransportMasterNodeAction<DeleteEnrichPolicyAction.Request, AcknowledgedResponse> {
+import static org.elasticsearch.xpack.core.ClientHelper.ENRICH_ORIGIN;
+
+public class TransportDeleteEnrichPolicyAction extends AcknowledgedTransportMasterNodeAction<DeleteEnrichPolicyAction.Request> {
 
     private final EnrichPolicyLocks enrichPolicyLocks;
     private final IngestService ingestService;
@@ -64,25 +68,12 @@ public class TransportDeleteEnrichPolicyAction extends TransportMasterNodeAction
             threadPool,
             actionFilters,
             DeleteEnrichPolicyAction.Request::new,
-            indexNameExpressionResolver
+            indexNameExpressionResolver,
+            ThreadPool.Names.SAME
         );
         this.client = client;
         this.enrichPolicyLocks = enrichPolicyLocks;
         this.ingestService = ingestService;
-    }
-
-    @Override
-    protected String executor() {
-        return ThreadPool.Names.SAME;
-    }
-
-    protected AcknowledgedResponse newResponse() {
-        throw new UnsupportedOperationException("usage of Streamable is to be replaced by Writeable");
-    }
-
-    @Override
-    protected AcknowledgedResponse read(StreamInput in) throws IOException {
-        return new AcknowledgedResponse(in);
     }
 
     @Override
@@ -92,15 +83,16 @@ public class TransportDeleteEnrichPolicyAction extends TransportMasterNodeAction
         ClusterState state,
         ActionListener<AcknowledgedResponse> listener
     ) throws Exception {
-        EnrichPolicy policy = EnrichStore.getPolicy(request.getName(), state); // ensure the policy exists first
+        final String policyName = request.getName();
+        final EnrichPolicy policy = EnrichStore.getPolicy(policyName, state); // ensure the policy exists first
         if (policy == null) {
-            throw new ResourceNotFoundException("policy [{}] not found", request.getName());
+            throw new ResourceNotFoundException("policy [{}] not found", policyName);
         }
 
-        enrichPolicyLocks.lockPolicy(request.getName());
+        enrichPolicyLocks.lockPolicy(policyName);
         try {
-            List<PipelineConfiguration> pipelines = IngestService.getPipelines(state);
-            List<String> pipelinesWithProcessors = new ArrayList<>();
+            final List<PipelineConfiguration> pipelines = IngestService.getPipelines(state);
+            final List<String> pipelinesWithProcessors = new ArrayList<>();
 
             for (PipelineConfiguration pipelineConfiguration : pipelines) {
                 List<AbstractEnrichProcessor> enrichProcessors = ingestService.getProcessorsInPipeline(
@@ -108,7 +100,7 @@ public class TransportDeleteEnrichPolicyAction extends TransportMasterNodeAction
                     AbstractEnrichProcessor.class
                 );
                 for (AbstractEnrichProcessor processor : enrichProcessors) {
-                    if (processor.getPolicyName().equals(request.getName())) {
+                    if (processor.getPolicyName().equals(policyName)) {
                         pipelinesWithProcessors.add(pipelineConfiguration.getId());
                     }
                 }
@@ -118,31 +110,45 @@ public class TransportDeleteEnrichPolicyAction extends TransportMasterNodeAction
                 throw new ElasticsearchStatusException(
                     "Could not delete policy [{}] because a pipeline is referencing it {}",
                     RestStatus.CONFLICT,
-                    request.getName(),
+                    policyName,
                     pipelinesWithProcessors
                 );
             }
         } catch (Exception e) {
-            enrichPolicyLocks.releasePolicy(request.getName());
+            enrichPolicyLocks.releasePolicy(policyName);
             listener.onFailure(e);
             return;
         }
 
-        deleteIndicesAndPolicy(request.getName(), ActionListener.wrap((response) -> {
-            enrichPolicyLocks.releasePolicy(request.getName());
+        final GetIndexRequest indices = new GetIndexRequest().indices(EnrichPolicy.getBaseName(policyName) + "-*")
+            .indicesOptions(IndicesOptions.lenientExpand());
+
+        String[] concreteIndices = indexNameExpressionResolver.concreteIndexNamesWithSystemIndexAccess(state, indices);
+
+        // the wildcard expansion could be too wide (e.g. in the case of a policy named policy-1 and another named policy-10),
+        // so we need to filter down to just the concrete indices that are actually indices for this policy
+        concreteIndices = Stream.of(concreteIndices).filter(i -> EnrichPolicy.isPolicyForIndex(policyName, i)).toArray(String[]::new);
+
+        deleteIndicesAndPolicy(concreteIndices, policyName, ActionListener.wrap((response) -> {
+            enrichPolicyLocks.releasePolicy(policyName);
             listener.onResponse(response);
         }, (exc) -> {
-            enrichPolicyLocks.releasePolicy(request.getName());
+            enrichPolicyLocks.releasePolicy(policyName);
             listener.onFailure(exc);
         }));
     }
 
-    private void deleteIndicesAndPolicy(String name, ActionListener<AcknowledgedResponse> listener) {
-        // delete all enrich indices for this policy
-        DeleteIndexRequest deleteRequest = new DeleteIndexRequest().indices(EnrichPolicy.getBaseName(name) + "-*")
-            .indicesOptions(LENIENT_OPTIONS);
+    private void deleteIndicesAndPolicy(String[] indices, String name, ActionListener<AcknowledgedResponse> listener) {
+        if (indices.length == 0) {
+            deletePolicy(name, listener);
+            return;
+        }
 
-        client.admin().indices().delete(deleteRequest, ActionListener.wrap((response) -> {
+        // delete all enrich indices for this policy, we delete concrete indices here but not a wildcard index expression
+        // as the setting 'action.destructive_requires_name' may be set to true
+        DeleteIndexRequest deleteRequest = new DeleteIndexRequest().indices(indices).indicesOptions(LENIENT_OPTIONS);
+
+        new OriginSettingClient(client, ENRICH_ORIGIN).admin().indices().delete(deleteRequest, ActionListener.wrap((response) -> {
             if (response.isAcknowledged() == false) {
                 listener.onFailure(
                     new ElasticsearchStatusException(
@@ -160,7 +166,7 @@ public class TransportDeleteEnrichPolicyAction extends TransportMasterNodeAction
     private void deletePolicy(String name, ActionListener<AcknowledgedResponse> listener) {
         EnrichStore.deletePolicy(name, clusterService, e -> {
             if (e == null) {
-                listener.onResponse(new AcknowledgedResponse(true));
+                listener.onResponse(AcknowledgedResponse.TRUE);
             } else {
                 listener.onFailure(e);
             }

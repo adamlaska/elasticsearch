@@ -1,20 +1,9 @@
 /*
- * Licensed to Elasticsearch under one or more contributor
- * license agreements. See the NOTICE file distributed with
- * this work for additional information regarding copyright
- * ownership. Elasticsearch licenses this file to you under
- * the Apache License, Version 2.0 (the "License"); you may
- * not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *    http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing,
- * software distributed under the License is distributed on an
- * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
- * KIND, either express or implied.  See the License for the
- * specific language governing permissions and limitations
- * under the License.
+ * Copyright Elasticsearch B.V. and/or licensed to Elasticsearch B.V. under one
+ * or more contributor license agreements. Licensed under the Elastic License
+ * 2.0 and the Server Side Public License, v 1; you may not use this file except
+ * in compliance with, at your election, the Elastic License 2.0 or the Server
+ * Side Public License, v 1.
  */
 
 package org.elasticsearch.action.admin.cluster.node.info;
@@ -27,9 +16,17 @@ import org.elasticsearch.common.Strings;
 import org.elasticsearch.common.io.stream.StreamInput;
 import org.elasticsearch.common.io.stream.StreamOutput;
 import org.elasticsearch.common.settings.Settings;
-import org.elasticsearch.common.xcontent.ToXContentFragment;
-import org.elasticsearch.common.xcontent.XContentBuilder;
-import org.elasticsearch.common.xcontent.XContentFactory;
+import org.elasticsearch.http.HttpInfo;
+import org.elasticsearch.ingest.IngestInfo;
+import org.elasticsearch.monitor.jvm.JvmInfo;
+import org.elasticsearch.monitor.os.OsInfo;
+import org.elasticsearch.monitor.process.ProcessInfo;
+import org.elasticsearch.search.aggregations.support.AggregationInfo;
+import org.elasticsearch.threadpool.ThreadPoolInfo;
+import org.elasticsearch.transport.TransportInfo;
+import org.elasticsearch.xcontent.ToXContentFragment;
+import org.elasticsearch.xcontent.XContentBuilder;
+import org.elasticsearch.xcontent.XContentFactory;
 
 import java.io.IOException;
 import java.util.List;
@@ -67,7 +64,8 @@ public class NodesInfoResponse extends BaseNodesResponse<NodeInfo> implements To
             builder.field("ip", nodeInfo.getNode().getHostAddress());
 
             builder.field("version", nodeInfo.getVersion());
-            builder.field("build_flavor", nodeInfo.getBuild().flavor().displayName());
+            // flavor no longer exists, but we keep it here for backcompat
+            builder.field("build_flavor", "default");
             builder.field("build_type", nodeInfo.getBuild().type().displayName());
             builder.field("build_hash", nodeInfo.getBuild().hash());
             if (nodeInfo.getTotalIndexingBuffer() != null) {
@@ -80,7 +78,7 @@ public class NodesInfoResponse extends BaseNodesResponse<NodeInfo> implements To
             }
             builder.endArray();
 
-            if (!nodeInfo.getNode().getAttributes().isEmpty()) {
+            if (nodeInfo.getNode().getAttributes().isEmpty() == false) {
                 builder.startObject("attributes");
                 for (Map.Entry<String, String> entry : nodeInfo.getNode().getAttributes().entrySet()) {
                     builder.field(entry.getKey(), entry.getValue());
@@ -95,29 +93,32 @@ public class NodesInfoResponse extends BaseNodesResponse<NodeInfo> implements To
                 builder.endObject();
             }
 
-            if (nodeInfo.getOs() != null) {
-                nodeInfo.getOs().toXContent(builder, params);
+            if (nodeInfo.getInfo(OsInfo.class) != null) {
+                nodeInfo.getInfo(OsInfo.class).toXContent(builder, params);
             }
-            if (nodeInfo.getProcess() != null) {
-                nodeInfo.getProcess().toXContent(builder, params);
+            if (nodeInfo.getInfo(ProcessInfo.class) != null) {
+                nodeInfo.getInfo(ProcessInfo.class).toXContent(builder, params);
             }
-            if (nodeInfo.getJvm() != null) {
-                nodeInfo.getJvm().toXContent(builder, params);
+            if (nodeInfo.getInfo(JvmInfo.class) != null) {
+                nodeInfo.getInfo(JvmInfo.class).toXContent(builder, params);
             }
-            if (nodeInfo.getThreadPool() != null) {
-                nodeInfo.getThreadPool().toXContent(builder, params);
+            if (nodeInfo.getInfo(ThreadPoolInfo.class) != null) {
+                nodeInfo.getInfo(ThreadPoolInfo.class).toXContent(builder, params);
             }
-            if (nodeInfo.getTransport() != null) {
-                nodeInfo.getTransport().toXContent(builder, params);
+            if (nodeInfo.getInfo(TransportInfo.class) != null) {
+                nodeInfo.getInfo(TransportInfo.class).toXContent(builder, params);
             }
-            if (nodeInfo.getHttp() != null) {
-                nodeInfo.getHttp().toXContent(builder, params);
+            if (nodeInfo.getInfo(HttpInfo.class) != null) {
+                nodeInfo.getInfo(HttpInfo.class).toXContent(builder, params);
             }
-            if (nodeInfo.getPlugins() != null) {
-                nodeInfo.getPlugins().toXContent(builder, params);
+            if (nodeInfo.getInfo(PluginsAndModules.class) != null) {
+                nodeInfo.getInfo(PluginsAndModules.class).toXContent(builder, params);
             }
-            if (nodeInfo.getIngest() != null) {
-                nodeInfo.getIngest().toXContent(builder, params);
+            if (nodeInfo.getInfo(IngestInfo.class) != null) {
+                nodeInfo.getInfo(IngestInfo.class).toXContent(builder, params);
+            }
+            if (nodeInfo.getInfo(AggregationInfo.class) != null) {
+                nodeInfo.getInfo(AggregationInfo.class).toXContent(builder, params);
             }
 
             builder.endObject();

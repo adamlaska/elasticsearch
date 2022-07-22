@@ -1,26 +1,26 @@
 /*
  * Copyright Elasticsearch B.V. and/or licensed to Elasticsearch B.V. under one
- * or more contributor license agreements. Licensed under the Elastic License;
- * you may not use this file except in compliance with the Elastic License.
+ * or more contributor license agreements. Licensed under the Elastic License
+ * 2.0; you may not use this file except in compliance with the Elastic License
+ * 2.0.
  */
 package org.elasticsearch.xpack.security.rest.action.privilege;
 
-import org.elasticsearch.client.node.NodeClient;
+import org.elasticsearch.client.internal.node.NodeClient;
 import org.elasticsearch.common.settings.Settings;
-import org.elasticsearch.common.xcontent.XContentBuilder;
 import org.elasticsearch.license.XPackLicenseState;
-import org.elasticsearch.rest.BytesRestResponse;
-import org.elasticsearch.rest.RestController;
 import org.elasticsearch.rest.RestRequest;
 import org.elasticsearch.rest.RestResponse;
 import org.elasticsearch.rest.RestStatus;
 import org.elasticsearch.rest.action.RestBuilderListener;
+import org.elasticsearch.xcontent.XContentBuilder;
 import org.elasticsearch.xpack.core.security.action.privilege.GetBuiltinPrivilegesAction;
 import org.elasticsearch.xpack.core.security.action.privilege.GetBuiltinPrivilegesRequest;
 import org.elasticsearch.xpack.core.security.action.privilege.GetBuiltinPrivilegesResponse;
 import org.elasticsearch.xpack.security.rest.action.SecurityBaseRestHandler;
 
 import java.io.IOException;
+import java.util.List;
 
 import static org.elasticsearch.rest.RestRequest.Method.GET;
 
@@ -29,10 +29,13 @@ import static org.elasticsearch.rest.RestRequest.Method.GET;
  */
 public class RestGetBuiltinPrivilegesAction extends SecurityBaseRestHandler {
 
-    public RestGetBuiltinPrivilegesAction(Settings settings, RestController controller, XPackLicenseState licenseState) {
+    public RestGetBuiltinPrivilegesAction(Settings settings, XPackLicenseState licenseState) {
         super(settings, licenseState);
-        controller.registerHandler(
-            GET, "/_security/privilege/_builtin", this);
+    }
+
+    @Override
+    public List<Route> routes() {
+        return List.of(new Route(GET, "/_security/privilege/_builtin"));
     }
 
     @Override
@@ -42,7 +45,9 @@ public class RestGetBuiltinPrivilegesAction extends SecurityBaseRestHandler {
 
     @Override
     public RestChannelConsumer innerPrepareRequest(RestRequest request, NodeClient client) throws IOException {
-        return channel -> client.execute(GetBuiltinPrivilegesAction.INSTANCE, new GetBuiltinPrivilegesRequest(),
+        return channel -> client.execute(
+            GetBuiltinPrivilegesAction.INSTANCE,
+            new GetBuiltinPrivilegesRequest(),
             new RestBuilderListener<>(channel) {
                 @Override
                 public RestResponse buildResponse(GetBuiltinPrivilegesResponse response, XContentBuilder builder) throws Exception {
@@ -50,9 +55,10 @@ public class RestGetBuiltinPrivilegesAction extends SecurityBaseRestHandler {
                     builder.array("cluster", response.getClusterPrivileges());
                     builder.array("index", response.getIndexPrivileges());
                     builder.endObject();
-                    return new BytesRestResponse(RestStatus.OK, builder);
+                    return new RestResponse(RestStatus.OK, builder);
                 }
-            });
+            }
+        );
     }
 
 }

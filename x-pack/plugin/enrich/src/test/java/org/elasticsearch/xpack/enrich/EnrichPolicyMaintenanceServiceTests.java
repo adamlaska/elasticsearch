@@ -1,9 +1,28 @@
 /*
  * Copyright Elasticsearch B.V. and/or licensed to Elasticsearch B.V. under one
- * or more contributor license agreements. Licensed under the Elastic License;
- * you may not use this file except in compliance with the Elastic License.
+ * or more contributor license agreements. Licensed under the Elastic License
+ * 2.0; you may not use this file except in compliance with the Elastic License
+ * 2.0.
  */
 package org.elasticsearch.xpack.enrich;
+
+import org.elasticsearch.action.admin.indices.alias.IndicesAliasesRequest;
+import org.elasticsearch.action.admin.indices.alias.get.GetAliasesRequest;
+import org.elasticsearch.action.admin.indices.alias.get.GetAliasesResponse;
+import org.elasticsearch.action.admin.indices.create.CreateIndexRequest;
+import org.elasticsearch.action.admin.indices.get.GetIndexRequest;
+import org.elasticsearch.action.admin.indices.get.GetIndexResponse;
+import org.elasticsearch.cluster.metadata.IndexNameExpressionResolver;
+import org.elasticsearch.cluster.service.ClusterService;
+import org.elasticsearch.common.settings.Settings;
+import org.elasticsearch.index.mapper.MapperService;
+import org.elasticsearch.indices.TestIndexNameExpressionResolver;
+import org.elasticsearch.plugins.Plugin;
+import org.elasticsearch.test.ESSingleNodeTestCase;
+import org.elasticsearch.threadpool.ThreadPool;
+import org.elasticsearch.xcontent.XContentBuilder;
+import org.elasticsearch.xcontent.json.JsonXContent;
+import org.elasticsearch.xpack.core.enrich.EnrichPolicy;
 
 import java.io.IOException;
 import java.util.ArrayList;
@@ -17,23 +36,6 @@ import java.util.concurrent.Phaser;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BiConsumer;
 import java.util.function.Consumer;
-
-import org.elasticsearch.action.admin.indices.alias.IndicesAliasesRequest;
-import org.elasticsearch.action.admin.indices.alias.get.GetAliasesRequest;
-import org.elasticsearch.action.admin.indices.alias.get.GetAliasesResponse;
-import org.elasticsearch.action.admin.indices.create.CreateIndexRequest;
-import org.elasticsearch.action.admin.indices.get.GetIndexRequest;
-import org.elasticsearch.action.admin.indices.get.GetIndexResponse;
-import org.elasticsearch.cluster.metadata.IndexNameExpressionResolver;
-import org.elasticsearch.cluster.service.ClusterService;
-import org.elasticsearch.common.settings.Settings;
-import org.elasticsearch.common.xcontent.XContentBuilder;
-import org.elasticsearch.common.xcontent.json.JsonXContent;
-import org.elasticsearch.index.mapper.MapperService;
-import org.elasticsearch.plugins.Plugin;
-import org.elasticsearch.test.ESSingleNodeTestCase;
-import org.elasticsearch.threadpool.ThreadPool;
-import org.elasticsearch.xpack.core.enrich.EnrichPolicy;
 
 import static org.elasticsearch.xpack.core.enrich.EnrichPolicy.MATCH_TYPE;
 import static org.elasticsearch.xpack.enrich.AbstractEnrichTestCase.createSourceIndices;
@@ -122,7 +124,7 @@ public class EnrichPolicyMaintenanceServiceTests extends ESSingleNodeTestCase {
     }
 
     private void addPolicy(String policyName, EnrichPolicy policy) throws InterruptedException {
-        IndexNameExpressionResolver resolver = new IndexNameExpressionResolver();
+        IndexNameExpressionResolver resolver = TestIndexNameExpressionResolver.newInstance();
         createSourceIndices(client(), policy);
         doSyncronously(
             (clusterService, exceptionConsumer) -> EnrichStore.putPolicy(policyName, policy, clusterService, resolver, exceptionConsumer)
@@ -163,7 +165,7 @@ public class EnrichPolicyMaintenanceServiceTests extends ESSingleNodeTestCase {
         }
         source.endObject();
         String newIndexName = EnrichPolicy.getBaseName(forPolicy) + "-" + indexNameAutoIncrementingCounter++;
-        CreateIndexRequest request = new CreateIndexRequest(newIndexName).mapping(MapperService.SINGLE_MAPPING_NAME, source);
+        CreateIndexRequest request = new CreateIndexRequest(newIndexName).mapping(source);
         client().admin().indices().create(request).actionGet();
         promoteFakePolicyIndex(newIndexName, forPolicy);
         return newIndexName;
@@ -173,7 +175,7 @@ public class EnrichPolicyMaintenanceServiceTests extends ESSingleNodeTestCase {
         String enrichIndexBase = EnrichPolicy.getBaseName(forPolicy);
         GetAliasesResponse getAliasesResponse = client().admin().indices().getAliases(new GetAliasesRequest(enrichIndexBase)).actionGet();
         IndicesAliasesRequest aliasToggleRequest = new IndicesAliasesRequest();
-        String[] indices = getAliasesResponse.getAliases().keys().toArray(String.class);
+        String[] indices = getAliasesResponse.getAliases().keySet().toArray(new String[0]);
         if (indices.length > 0) {
             aliasToggleRequest.addAliasAction(IndicesAliasesRequest.AliasActions.remove().indices(indices).alias(enrichIndexBase));
         }

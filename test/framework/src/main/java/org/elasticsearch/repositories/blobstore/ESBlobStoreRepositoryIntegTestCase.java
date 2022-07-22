@@ -1,49 +1,54 @@
 /*
- * Licensed to Elasticsearch under one or more contributor
- * license agreements. See the NOTICE file distributed with
- * this work for additional information regarding copyright
- * ownership. Elasticsearch licenses this file to you under
- * the Apache License, Version 2.0 (the "License"); you may
- * not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *    http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing,
- * software distributed under the License is distributed on an
- * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
- * KIND, either express or implied.  See the License for the
- * specific language governing permissions and limitations
- * under the License.
+ * Copyright Elasticsearch B.V. and/or licensed to Elasticsearch B.V. under one
+ * or more contributor license agreements. Licensed under the Elastic License
+ * 2.0 and the Server Side Public License, v 1; you may not use this file except
+ * in compliance with, at your election, the Elastic License 2.0 or the Server
+ * Side Public License, v 1.
  */
 package org.elasticsearch.repositories.blobstore;
 
+import org.apache.lucene.util.BytesRef;
+import org.apache.lucene.util.BytesRefBuilder;
 import org.apache.lucene.util.SetOnce;
+import org.elasticsearch.action.ActionRunnable;
 import org.elasticsearch.action.admin.cluster.snapshots.create.CreateSnapshotRequestBuilder;
 import org.elasticsearch.action.admin.cluster.snapshots.create.CreateSnapshotResponse;
 import org.elasticsearch.action.admin.cluster.snapshots.restore.RestoreSnapshotRequestBuilder;
 import org.elasticsearch.action.admin.cluster.snapshots.restore.RestoreSnapshotResponse;
 import org.elasticsearch.action.index.IndexRequestBuilder;
 import org.elasticsearch.action.support.PlainActionFuture;
-import org.elasticsearch.client.Client;
+import org.elasticsearch.client.internal.Client;
 import org.elasticsearch.common.blobstore.BlobContainer;
+import org.elasticsearch.common.blobstore.BlobPath;
 import org.elasticsearch.common.blobstore.BlobStore;
+import org.elasticsearch.common.blobstore.support.BlobMetadata;
+import org.elasticsearch.common.bytes.BytesArray;
+import org.elasticsearch.common.io.Streams;
 import org.elasticsearch.common.settings.Settings;
+import org.elasticsearch.core.TimeValue;
 import org.elasticsearch.repositories.IndexId;
 import org.elasticsearch.repositories.RepositoriesService;
 import org.elasticsearch.repositories.Repository;
 import org.elasticsearch.repositories.RepositoryData;
+import org.elasticsearch.repositories.RepositoryMissingException;
 import org.elasticsearch.snapshots.SnapshotMissingException;
 import org.elasticsearch.snapshots.SnapshotRestoreException;
 import org.elasticsearch.test.ESIntegTestCase;
 import org.elasticsearch.threadpool.ThreadPool;
+import org.hamcrest.CoreMatchers;
 
+import java.io.IOException;
+import java.io.InputStream;
+import java.nio.file.NoSuchFileException;
 import java.util.Arrays;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Set;
 
+import static org.elasticsearch.repositories.blobstore.BlobStoreRepository.READONLY_SETTING_KEY;
 import static org.elasticsearch.test.hamcrest.ElasticsearchAssertions.assertAcked;
 import static org.elasticsearch.test.hamcrest.ElasticsearchAssertions.assertHitCount;
 import static org.hamcrest.Matchers.equalTo;
@@ -64,27 +69,28 @@ public abstract class ESBlobStoreRepositoryIntegTestCase extends ESIntegTestCase
 
     protected abstract String repositoryType();
 
-    protected Settings repositorySettings() {
+    protected Settings repositorySettings(String repoName) {
         return Settings.builder().put("compress", randomBoolean()).build();
     }
 
     protected final String createRepository(final String name) {
-        return createRepository(name, repositorySettings());
+        return createRepository(name, true);
     }
 
-    protected final String createRepository(final String name, final Settings settings) {
-        final boolean verify = randomBoolean();
+    protected final String createRepository(final String name, final boolean verify) {
+        return createRepository(name, repositorySettings(name), verify);
+    }
 
-        logger.debug("-->  creating repository [name: {}, verify: {}, settings: {}]", name, verify, settings);
-        assertAcked(client().admin().cluster().preparePutRepository(name)
-            .setType(repositoryType())
-            .setVerify(verify)
-            .setSettings(settings));
+    protected final String createRepository(final String name, final Settings settings, final boolean verify) {
+        logger.info("-->  creating repository [name: {}, verify: {}, settings: {}]", name, verify, settings);
+        assertAcked(
+            client().admin().cluster().preparePutRepository(name).setType(repositoryType()).setVerify(verify).setSettings(settings)
+        );
 
         internalCluster().getDataOrMasterNodeInstances(RepositoriesService.class).forEach(repositories -> {
             assertThat(repositories.repository(name), notNullValue());
             assertThat(repositories.repository(name), instanceOf(BlobStoreRepository.class));
-            assertThat(repositories.repository(name).isReadOnly(), is(false));
+            assertThat(repositories.repository(name).isReadOnly(), is(settings.getAsBoolean(READONLY_SETTING_KEY, false)));
             BlobStore blobStore = ((BlobStoreRepository) repositories.repository(name)).getBlobStore();
             assertThat("blob store has to be lazy initialized", blobStore, verify ? is(notNullValue()) : is(nullValue()));
         });
@@ -92,8 +98,193 @@ public abstract class ESBlobStoreRepositoryIntegTestCase extends ESIntegTestCase
         return name;
     }
 
+    protected final void deleteRepository(final String name) {
+        logger.debug("-->  deleting repository [name: {}]", name);
+        assertAcked(client().admin().cluster().prepareDeleteRepository(name));
+        internalCluster().getDataOrMasterNodeInstances(RepositoriesService.class).forEach(repositories -> {
+            RepositoryMissingException e = expectThrows(RepositoryMissingException.class, () -> repositories.repository(name));
+            assertThat(e.repository(), equalTo(name));
+        });
+    }
+
+    public void testReadNonExistingPath() throws IOException {
+        try (BlobStore store = newBlobStore()) {
+            final BlobContainer container = store.blobContainer(BlobPath.EMPTY);
+            expectThrows(NoSuchFileException.class, () -> {
+                try (InputStream is = container.readBlob("non-existing")) {
+                    is.read();
+                }
+            });
+        }
+    }
+
+    public void testWriteRead() throws IOException {
+        try (BlobStore store = newBlobStore()) {
+            final BlobContainer container = store.blobContainer(BlobPath.EMPTY);
+            byte[] data = randomBytes(randomIntBetween(10, scaledRandomIntBetween(1024, 1 << 16)));
+            writeBlob(container, "foobar", new BytesArray(data), randomBoolean());
+            if (randomBoolean()) {
+                // override file, to check if we get latest contents
+                data = randomBytes(randomIntBetween(10, scaledRandomIntBetween(1024, 1 << 16)));
+                writeBlob(container, "foobar", new BytesArray(data), false);
+            }
+            try (InputStream stream = container.readBlob("foobar")) {
+                BytesRefBuilder target = new BytesRefBuilder();
+                while (target.length() < data.length) {
+                    byte[] buffer = new byte[scaledRandomIntBetween(1, data.length - target.length())];
+                    int offset = scaledRandomIntBetween(0, buffer.length - 1);
+                    int read = stream.read(buffer, offset, buffer.length - offset);
+                    if (read >= 0) {
+                        target.append(new BytesRef(buffer, offset, read));
+                    } else {
+                        fail("Expected [" + (data.length - target.length()) + "] more bytes to be readable but reached EOF");
+                    }
+                }
+                assertEquals(data.length, target.length());
+                assertArrayEquals(data, Arrays.copyOfRange(target.bytes(), 0, target.length()));
+            }
+            container.delete();
+        }
+    }
+
+    public void testList() throws IOException {
+        try (BlobStore store = newBlobStore()) {
+            final BlobContainer container = store.blobContainer(BlobPath.EMPTY);
+            assertThat(container.listBlobs().size(), CoreMatchers.equalTo(0));
+            int numberOfFooBlobs = randomIntBetween(0, 10);
+            int numberOfBarBlobs = randomIntBetween(3, 20);
+            Map<String, Long> generatedBlobs = new HashMap<>();
+            for (int i = 0; i < numberOfFooBlobs; i++) {
+                int length = randomIntBetween(10, 100);
+                String name = "foo-" + i + "-";
+                generatedBlobs.put(name, (long) length);
+                writeRandomBlob(container, name, length);
+            }
+            for (int i = 1; i < numberOfBarBlobs; i++) {
+                int length = randomIntBetween(10, 100);
+                String name = "bar-" + i + "-";
+                generatedBlobs.put(name, (long) length);
+                writeRandomBlob(container, name, length);
+            }
+            int length = randomIntBetween(10, 100);
+            String name = "bar-0-";
+            generatedBlobs.put(name, (long) length);
+            writeRandomBlob(container, name, length);
+
+            Map<String, BlobMetadata> blobs = container.listBlobs();
+            assertThat(blobs.size(), CoreMatchers.equalTo(numberOfFooBlobs + numberOfBarBlobs));
+            for (Map.Entry<String, Long> generated : generatedBlobs.entrySet()) {
+                BlobMetadata blobMetadata = blobs.get(generated.getKey());
+                assertThat(generated.getKey(), blobMetadata, CoreMatchers.notNullValue());
+                assertThat(blobMetadata.name(), CoreMatchers.equalTo(generated.getKey()));
+                assertThat(blobMetadata.length(), CoreMatchers.equalTo(blobLengthFromContentLength(generated.getValue())));
+            }
+
+            assertThat(container.listBlobsByPrefix("foo-").size(), CoreMatchers.equalTo(numberOfFooBlobs));
+            assertThat(container.listBlobsByPrefix("bar-").size(), CoreMatchers.equalTo(numberOfBarBlobs));
+            assertThat(container.listBlobsByPrefix("baz-").size(), CoreMatchers.equalTo(0));
+            container.delete();
+        }
+    }
+
+    public void testDeleteBlobs() throws IOException {
+        try (BlobStore store = newBlobStore()) {
+            final List<String> blobNames = Arrays.asList("foobar", "barfoo");
+            final BlobContainer container = store.blobContainer(BlobPath.EMPTY);
+            container.deleteBlobsIgnoringIfNotExists(blobNames.iterator()); // does not raise when blobs don't exist
+            byte[] data = randomBytes(randomIntBetween(10, scaledRandomIntBetween(1024, 1 << 16)));
+            final BytesArray bytesArray = new BytesArray(data);
+            for (String blobName : blobNames) {
+                writeBlob(container, blobName, bytesArray, randomBoolean());
+            }
+            assertEquals(container.listBlobs().size(), 2);
+            container.deleteBlobsIgnoringIfNotExists(blobNames.iterator());
+            assertTrue(container.listBlobs().isEmpty());
+            container.deleteBlobsIgnoringIfNotExists(blobNames.iterator()); // does not raise when blobs don't exist
+        }
+    }
+
+    public static void writeBlob(
+        final BlobContainer container,
+        final String blobName,
+        final BytesArray bytesArray,
+        boolean failIfAlreadyExists
+    ) throws IOException {
+        if (randomBoolean()) {
+            container.writeBlob(blobName, bytesArray, failIfAlreadyExists);
+        } else {
+            container.writeBlobAtomic(blobName, bytesArray, failIfAlreadyExists);
+        }
+    }
+
+    public void testContainerCreationAndDeletion() throws IOException {
+        try (BlobStore store = newBlobStore()) {
+            final BlobContainer containerFoo = store.blobContainer(BlobPath.EMPTY.add("foo"));
+            final BlobContainer containerBar = store.blobContainer(BlobPath.EMPTY.add("bar"));
+            byte[] data1 = randomBytes(randomIntBetween(10, scaledRandomIntBetween(1024, 1 << 16)));
+            byte[] data2 = randomBytes(randomIntBetween(10, scaledRandomIntBetween(1024, 1 << 16)));
+            writeBlob(containerFoo, "test", new BytesArray(data1));
+            writeBlob(containerBar, "test", new BytesArray(data2));
+
+            assertArrayEquals(readBlobFully(containerFoo, "test", data1.length), data1);
+            assertArrayEquals(readBlobFully(containerBar, "test", data2.length), data2);
+
+            assertTrue(containerFoo.blobExists("test"));
+            assertTrue(containerBar.blobExists("test"));
+            containerBar.delete();
+            containerFoo.delete();
+        }
+    }
+
+    public static byte[] writeRandomBlob(BlobContainer container, String name, int length) throws IOException {
+        byte[] data = randomBytes(length);
+        writeBlob(container, name, new BytesArray(data));
+        return data;
+    }
+
+    public static byte[] readBlobFully(BlobContainer container, String name, int length) throws IOException {
+        byte[] data = new byte[length];
+        try (InputStream inputStream = container.readBlob(name)) {
+            assertThat(Streams.readFully(inputStream, data), CoreMatchers.equalTo(length));
+            assertThat(inputStream.read(), CoreMatchers.equalTo(-1));
+        }
+        return data;
+    }
+
+    public static byte[] randomBytes(int length) {
+        byte[] data = new byte[length];
+        for (int i = 0; i < data.length; i++) {
+            data[i] = (byte) randomInt();
+        }
+        return data;
+    }
+
+    protected static void writeBlob(BlobContainer container, String blobName, BytesArray bytesArray) throws IOException {
+        container.writeBlob(blobName, bytesArray, true);
+    }
+
+    protected BlobStore newBlobStore() {
+        final String repository = createRepository(randomRepositoryName());
+        return newBlobStore(repository);
+    }
+
+    protected BlobStore newBlobStore(String repository) {
+        final BlobStoreRepository blobStoreRepository = (BlobStoreRepository) internalCluster().getAnyMasterNodeInstance(
+            RepositoriesService.class
+        ).repository(repository);
+        return PlainActionFuture.get(
+            f -> blobStoreRepository.threadPool().generic().execute(ActionRunnable.supply(f, blobStoreRepository::blobStore))
+        );
+    }
+
     public void testSnapshotAndRestore() throws Exception {
-        final String repoName = createRepository(randomName());
+        testSnapshotAndRestore(randomBoolean());
+    }
+
+    protected void testSnapshotAndRestore(boolean recreateRepositoryBeforeRestore) throws Exception {
+        final String repoName = randomRepositoryName();
+        final Settings repoSettings = repositorySettings(repoName);
+        createRepository(repoName, repoSettings, randomBoolean());
         int indexCount = randomIntBetween(1, 5);
         int[] docCounts = new int[indexCount];
         String[] indexNames = generateRandomNames(indexCount);
@@ -106,8 +297,9 @@ public abstract class ESBlobStoreRepositoryIntegTestCase extends ESIntegTestCase
 
         final String snapshotName = randomName();
         logger.info("-->  create snapshot {}:{}", repoName, snapshotName);
-        assertSuccessfulSnapshot(client().admin().cluster().prepareCreateSnapshot(repoName, snapshotName)
-                .setWaitForCompletion(true).setIndices(indexNames));
+        assertSuccessfulSnapshot(
+            client().admin().cluster().prepareCreateSnapshot(repoName, snapshotName).setWaitForCompletion(true).setIndices(indexNames)
+        );
 
         List<String> deleteIndices = randomSubsetOf(randomIntBetween(0, indexCount), indexNames);
         if (deleteIndices.size() > 0) {
@@ -141,10 +333,16 @@ public abstract class ESBlobStoreRepositoryIntegTestCase extends ESIntegTestCase
             assertAcked(client().admin().indices().prepareClose(closeIndices.toArray(new String[closeIndices.size()])));
         }
 
+        if (recreateRepositoryBeforeRestore) {
+            deleteRepository(repoName);
+            createRepository(repoName, repoSettings, randomBoolean());
+        }
+
         logger.info("--> restore all indices from the snapshot");
         assertSuccessfulRestore(client().admin().cluster().prepareRestoreSnapshot(repoName, snapshotName).setWaitForCompletion(true));
 
-        ensureGreen();
+        // higher timeout since we can have quite a few shards and a little more data here
+        ensureGreen(TimeValue.timeValueSeconds(120));
 
         for (int i = 0; i < indexCount; i++) {
             assertHitCount(client().prepareSearch(indexNames[i]).setSize(0).get(), docCounts[i]);
@@ -153,18 +351,21 @@ public abstract class ESBlobStoreRepositoryIntegTestCase extends ESIntegTestCase
         logger.info("-->  delete snapshot {}:{}", repoName, snapshotName);
         assertAcked(client().admin().cluster().prepareDeleteSnapshot(repoName, snapshotName).get());
 
-        expectThrows(SnapshotMissingException.class, () ->
-            client().admin().cluster().prepareGetSnapshots(repoName).setSnapshots(snapshotName).get().getSnapshots(repoName));
+        expectThrows(
+            SnapshotMissingException.class,
+            () -> client().admin().cluster().prepareGetSnapshots(repoName).setSnapshots(snapshotName).execute().actionGet()
+        );
 
-        expectThrows(SnapshotMissingException.class, () ->
-            client().admin().cluster().prepareDeleteSnapshot(repoName, snapshotName).get());
+        expectThrows(SnapshotMissingException.class, () -> client().admin().cluster().prepareDeleteSnapshot(repoName, snapshotName).get());
 
-        expectThrows(SnapshotRestoreException.class, () ->
-            client().admin().cluster().prepareRestoreSnapshot(repoName, snapshotName).setWaitForCompletion(randomBoolean()).get());
+        expectThrows(
+            SnapshotRestoreException.class,
+            () -> client().admin().cluster().prepareRestoreSnapshot(repoName, snapshotName).setWaitForCompletion(randomBoolean()).get()
+        );
     }
 
     public void testMultipleSnapshotAndRollback() throws Exception {
-        final String repoName = createRepository(randomName());
+        final String repoName = createRepository(randomRepositoryName());
         int iterationCount = randomIntBetween(2, 5);
         int[] docCounts = new int[iterationCount];
         String indexName = randomName();
@@ -190,8 +391,13 @@ public abstract class ESBlobStoreRepositoryIntegTestCase extends ESIntegTestCase
             // Check number of documents in this iteration
             docCounts[i] = (int) client().prepareSearch(indexName).setSize(0).get().getHits().getTotalHits().value;
             logger.info("-->  create snapshot {}:{} with {} documents", repoName, snapshotName + "-" + i, docCounts[i]);
-            assertSuccessfulSnapshot(client().admin().cluster().prepareCreateSnapshot(repoName, snapshotName + "-" + i)
-                    .setWaitForCompletion(true).setIndices(indexName));
+            assertSuccessfulSnapshot(
+                client().admin()
+                    .cluster()
+                    .prepareCreateSnapshot(repoName, snapshotName + "-" + i)
+                    .setWaitForCompletion(true)
+                    .setIndices(indexName)
+            );
         }
 
         int restoreOperations = randomIntBetween(1, 3);
@@ -205,8 +411,12 @@ public abstract class ESBlobStoreRepositoryIntegTestCase extends ESIntegTestCase
             assertAcked(client().admin().indices().prepareClose(indexName));
 
             logger.info("--> restore index from the snapshot");
-            assertSuccessfulRestore(client().admin().cluster().prepareRestoreSnapshot(repoName, snapshotName + "-" + iterationToRestore)
-                    .setWaitForCompletion(true));
+            assertSuccessfulRestore(
+                client().admin()
+                    .cluster()
+                    .prepareRestoreSnapshot(repoName, snapshotName + "-" + iterationToRestore)
+                    .setWaitForCompletion(true)
+            );
 
             ensureGreen();
             assertHitCount(client().prepareSearch(indexName).setSize(0).get(), docCounts[iterationToRestore]);
@@ -219,7 +429,7 @@ public abstract class ESBlobStoreRepositoryIntegTestCase extends ESIntegTestCase
     }
 
     public void testIndicesDeletedFromRepository() throws Exception {
-        final String repoName = createRepository("test-repo");
+        final String repoName = createRepository(randomRepositoryName());
         Client client = client();
         createIndex("test-idx-1", "test-idx-2", "test-idx-3");
         ensureGreen();
@@ -233,8 +443,11 @@ public abstract class ESBlobStoreRepositoryIntegTestCase extends ESIntegTestCase
         refresh();
 
         logger.info("--> take a snapshot");
-        CreateSnapshotResponse createSnapshotResponse =
-            client.admin().cluster().prepareCreateSnapshot(repoName, "test-snap").setWaitForCompletion(true).get();
+        CreateSnapshotResponse createSnapshotResponse = client.admin()
+            .cluster()
+            .prepareCreateSnapshot(repoName, "test-snap")
+            .setWaitForCompletion(true)
+            .get();
         assertEquals(createSnapshotResponse.getSnapshotInfo().successfulShards(), createSnapshotResponse.getSnapshotInfo().totalShards());
 
         logger.info("--> indexing more data");
@@ -245,10 +458,12 @@ public abstract class ESBlobStoreRepositoryIntegTestCase extends ESIntegTestCase
         }
 
         logger.info("--> take another snapshot with only 2 of the 3 indices");
-        createSnapshotResponse = client.admin().cluster().prepareCreateSnapshot(repoName, "test-snap2")
-                                     .setWaitForCompletion(true)
-                                     .setIndices("test-idx-1", "test-idx-2")
-                                     .get();
+        createSnapshotResponse = client.admin()
+            .cluster()
+            .prepareCreateSnapshot(repoName, "test-snap2")
+            .setWaitForCompletion(true)
+            .setIndices("test-idx-1", "test-idx-2")
+            .get();
         assertEquals(createSnapshotResponse.getSnapshotInfo().successfulShards(), createSnapshotResponse.getSnapshotInfo().totalShards());
 
         logger.info("--> delete a snapshot");
@@ -268,7 +483,7 @@ public abstract class ESBlobStoreRepositoryIntegTestCase extends ESIntegTestCase
 
         for (IndexId indexId : repositoryData.actionGet().getIndices().values()) {
             if (indexId.getName().equals("test-idx-3")) {
-                assertFalse(BlobStoreTestUtil.blobExists(indicesBlobContainer.get(), indexId.getId())); // deleted index
+                assertFalse(indicesBlobContainer.get().blobExists(indexId.getId())); // deleted index
             }
         }
 
@@ -278,8 +493,10 @@ public abstract class ESBlobStoreRepositoryIntegTestCase extends ESIntegTestCase
     protected void addRandomDocuments(String name, int numDocs) throws InterruptedException {
         IndexRequestBuilder[] indexRequestBuilders = new IndexRequestBuilder[numDocs];
         for (int i = 0; i < numDocs; i++) {
-            indexRequestBuilders[i] = client().prepareIndex(name).setId(Integer.toString(i))
-                .setRouting(randomAlphaOfLength(randomIntBetween(1, 10))).setSource("field", "value");
+            indexRequestBuilders[i] = client().prepareIndex(name)
+                .setId(Integer.toString(i))
+                .setRouting(randomAlphaOfLength(randomIntBetween(1, 10)))
+                .setSource("field", "value");
         }
         indexRandom(true, indexRequestBuilders);
     }
@@ -316,7 +533,15 @@ public abstract class ESBlobStoreRepositoryIntegTestCase extends ESIntegTestCase
         assertThat(response.getRestoreInfo().successfulShards(), equalTo(response.getRestoreInfo().totalShards()));
     }
 
-    protected static String randomName() {
+    protected String randomName() {
         return randomAlphaOfLength(randomIntBetween(1, 10)).toLowerCase(Locale.ROOT);
+    }
+
+    protected String randomRepositoryName() {
+        return randomName();
+    }
+
+    protected long blobLengthFromContentLength(long contentLength) {
+        return contentLength;
     }
 }

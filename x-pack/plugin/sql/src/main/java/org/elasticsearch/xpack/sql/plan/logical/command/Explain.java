@@ -1,25 +1,26 @@
 /*
  * Copyright Elasticsearch B.V. and/or licensed to Elasticsearch B.V. under one
- * or more contributor license agreements. Licensed under the Elastic License;
- * you may not use this file except in compliance with the Elastic License.
+ * or more contributor license agreements. Licensed under the Elastic License
+ * 2.0; you may not use this file except in compliance with the Elastic License
+ * 2.0.
  */
 package org.elasticsearch.xpack.sql.plan.logical.command;
 
 import org.elasticsearch.action.ActionListener;
 import org.elasticsearch.common.Strings;
-import org.elasticsearch.xpack.sql.expression.Attribute;
-import org.elasticsearch.xpack.sql.expression.FieldAttribute;
-import org.elasticsearch.xpack.sql.plan.QueryPlan;
-import org.elasticsearch.xpack.sql.plan.logical.LogicalPlan;
+import org.elasticsearch.xpack.ql.expression.Attribute;
+import org.elasticsearch.xpack.ql.expression.FieldAttribute;
+import org.elasticsearch.xpack.ql.plan.QueryPlan;
+import org.elasticsearch.xpack.ql.plan.logical.LogicalPlan;
+import org.elasticsearch.xpack.ql.tree.NodeInfo;
+import org.elasticsearch.xpack.ql.tree.Source;
+import org.elasticsearch.xpack.ql.type.KeywordEsField;
+import org.elasticsearch.xpack.ql.util.Graphviz;
 import org.elasticsearch.xpack.sql.plan.physical.PhysicalPlan;
 import org.elasticsearch.xpack.sql.planner.Planner;
 import org.elasticsearch.xpack.sql.session.Cursor.Page;
 import org.elasticsearch.xpack.sql.session.Rows;
 import org.elasticsearch.xpack.sql.session.SqlSession;
-import org.elasticsearch.xpack.sql.tree.NodeInfo;
-import org.elasticsearch.xpack.sql.tree.Source;
-import org.elasticsearch.xpack.sql.type.KeywordEsField;
-import org.elasticsearch.xpack.sql.util.Graphviz;
 
 import java.util.HashMap;
 import java.util.List;
@@ -34,7 +35,12 @@ import static org.elasticsearch.action.ActionListener.wrap;
 public class Explain extends Command {
 
     public enum Type {
-        PARSED, ANALYZED, OPTIMIZED, MAPPED, EXECUTABLE, ALL;
+        PARSED,
+        ANALYZED,
+        OPTIMIZED,
+        MAPPED,
+        EXECUTABLE,
+        ALL;
 
         public String printableName() {
             return Strings.capitalize(name().toLowerCase(Locale.ROOT));
@@ -42,7 +48,8 @@ public class Explain extends Command {
     }
 
     public enum Format {
-        TEXT, GRAPHVIZ
+        TEXT,
+        GRAPHVIZ
     }
 
     private final LogicalPlan plan;
@@ -122,15 +129,18 @@ public class Explain extends Command {
                     }
 
                     // Type.All
-                    listener.onResponse(Page.last(
-                            Rows.singleton(output(), printPlans(format, plan, analyzedPlan, optimizedPlan, mappedPlan, executablePlan))));
+                    listener.onResponse(
+                        Page.last(
+                            Rows.singleton(output(), printPlans(format, plan, analyzedPlan, optimizedPlan, mappedPlan, executablePlan))
+                        )
+                    );
                 }, listener::onFailure));
             }
 
             // check errors manually to see how far the plans work out
             else {
                 // no analysis failure, can move on
-                if (session.verifier().verifyFailures(analyzedPlan).isEmpty()) {
+                if (session.verifier().verifyFailures(analyzedPlan, session.configuration().version()).isEmpty()) {
                     session.optimizedPlan(analyzedPlan, wrap(optimizedPlan -> {
                         if (type == Type.OPTIMIZED) {
                             listener.onResponse(Page.last(Rows.singleton(output(), formatPlan(format, optimizedPlan))));
@@ -152,8 +162,14 @@ public class Explain extends Command {
                                 return;
                             }
 
-                            listener.onResponse(Page.last(Rows.singleton(output(),
-                                    printPlans(format, plan, analyzedPlan, optimizedPlan, mappedPlan, executablePlan))));
+                            listener.onResponse(
+                                Page.last(
+                                    Rows.singleton(
+                                        output(),
+                                        printPlans(format, plan, analyzedPlan, optimizedPlan, mappedPlan, executablePlan)
+                                    )
+                                )
+                            );
                             return;
                         }
                         // mapped failed
@@ -162,15 +178,15 @@ public class Explain extends Command {
                             return;
                         }
 
-                        listener.onResponse(Page
-                                .last(Rows.singleton(output(), printPlans(format, plan, analyzedPlan, optimizedPlan, mappedPlan, null))));
+                        listener.onResponse(
+                            Page.last(Rows.singleton(output(), printPlans(format, plan, analyzedPlan, optimizedPlan, mappedPlan, null)))
+                        );
                     }, listener::onFailure));
                     // cannot continue
                 } else {
                     if (type != Type.ALL) {
                         listener.onResponse(Page.last(Rows.singleton(output(), formatPlan(format, analyzedPlan))));
-                    }
-                    else {
+                    } else {
                         listener.onResponse(Page.last(Rows.singleton(output(), printPlans(format, plan, analyzedPlan, null, null, null))));
                     }
                 }
@@ -178,8 +194,14 @@ public class Explain extends Command {
         }, listener::onFailure));
     }
 
-    private static String printPlans(Format format, LogicalPlan parsed, LogicalPlan analyzedPlan, LogicalPlan optimizedPlan,
-            PhysicalPlan mappedPlan, PhysicalPlan executionPlan) {
+    private static String printPlans(
+        Format format,
+        LogicalPlan parsed,
+        LogicalPlan analyzedPlan,
+        LogicalPlan optimizedPlan,
+        PhysicalPlan mappedPlan,
+        PhysicalPlan executionPlan
+    ) {
         if (format == Format.TEXT) {
             StringBuilder sb = new StringBuilder();
             sb.append("Parsed\n");
@@ -236,8 +258,8 @@ public class Explain extends Command {
         }
         Explain o = (Explain) obj;
         return Objects.equals(verify, o.verify)
-                && Objects.equals(format, o.format)
-                && Objects.equals(type, o.type)
-                && Objects.equals(plan, o.plan);
+            && Objects.equals(format, o.format)
+            && Objects.equals(type, o.type)
+            && Objects.equals(plan, o.plan);
     }
 }

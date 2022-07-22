@@ -1,20 +1,9 @@
 /*
- * Licensed to Elasticsearch under one or more contributor
- * license agreements. See the NOTICE file distributed with
- * this work for additional information regarding copyright
- * ownership. Elasticsearch licenses this file to you under
- * the Apache License, Version 2.0 (the "License"); you may
- * not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *    http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing,
- * software distributed under the License is distributed on an
- * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
- * KIND, either express or implied.  See the License for the
- * specific language governing permissions and limitations
- * under the License.
+ * Copyright Elasticsearch B.V. and/or licensed to Elasticsearch B.V. under one
+ * or more contributor license agreements. Licensed under the Elastic License
+ * 2.0 and the Server Side Public License, v 1; you may not use this file except
+ * in compliance with, at your election, the Elastic License 2.0 or the Server
+ * Side Public License, v 1.
  */
 
 package org.elasticsearch.transport.netty4;
@@ -23,13 +12,18 @@ import io.netty.buffer.ByteBuf;
 import io.netty.buffer.CompositeByteBuf;
 import io.netty.buffer.Unpooled;
 import io.netty.util.NettyRuntime;
+
 import org.apache.lucene.util.BytesRef;
 import org.apache.lucene.util.BytesRefIterator;
-import org.elasticsearch.common.Booleans;
 import org.elasticsearch.common.bytes.BytesArray;
 import org.elasticsearch.common.bytes.BytesReference;
+import org.elasticsearch.common.recycler.Recycler;
+import org.elasticsearch.common.settings.Settings;
+import org.elasticsearch.common.util.concurrent.EsExecutors;
+import org.elasticsearch.core.Booleans;
 
 import java.io.IOException;
+import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
@@ -37,7 +31,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 
 public class Netty4Utils {
 
-    private static AtomicBoolean isAvailableProcessorsSet = new AtomicBoolean();
+    private static final AtomicBoolean isAvailableProcessorsSet = new AtomicBoolean();
 
     /**
      * Set the number of available processors that Netty uses for sizing various resources (e.g., thread pools).
@@ -48,7 +42,7 @@ public class Netty4Utils {
     public static void setAvailableProcessors(final int availableProcessors) {
         // we set this to false in tests to avoid tests that randomly set processors from stepping on each other
         final boolean set = Booleans.parseBoolean(System.getProperty("es.set.netty.runtime.available.processors", "true"));
-        if (!set) {
+        if (set == false) {
             return;
         }
 
@@ -64,10 +58,11 @@ public class Netty4Utils {
              * in Netty and our previous value did not take, bail.
              */
             final String message = String.format(
-                    Locale.ROOT,
-                    "available processors value [%d] did not match current value [%d]",
-                    availableProcessors,
-                    NettyRuntime.availableProcessors());
+                Locale.ROOT,
+                "available processors value [%d] did not match current value [%d]",
+                availableProcessors,
+                NettyRuntime.availableProcessors()
+            );
             throw new IllegalStateException(message);
         }
     }
@@ -80,28 +75,24 @@ public class Netty4Utils {
         if (reference.length() == 0) {
             return Unpooled.EMPTY_BUFFER;
         }
-        if (reference instanceof ByteBufBytesReference) {
-            return ((ByteBufBytesReference) reference).toByteBuf();
-        } else {
-            final BytesRefIterator iterator = reference.iterator();
-            // usually we have one, two, or three components from the header, the message, and a buffer
-            final List<ByteBuf> buffers = new ArrayList<>(3);
-            try {
-                BytesRef slice;
-                while ((slice = iterator.next()) != null) {
-                    buffers.add(Unpooled.wrappedBuffer(slice.bytes, slice.offset, slice.length));
-                }
-
-                if (buffers.size() == 1) {
-                    return buffers.get(0);
-                } else {
-                    CompositeByteBuf composite = Unpooled.compositeBuffer(buffers.size());
-                    composite.addComponents(true, buffers);
-                    return composite;
-                }
-            } catch (IOException ex) {
-                throw new AssertionError("no IO happens here", ex);
+        final BytesRefIterator iterator = reference.iterator();
+        // usually we have one, two, or three components from the header, the message, and a buffer
+        final List<ByteBuf> buffers = new ArrayList<>(3);
+        try {
+            BytesRef slice;
+            while ((slice = iterator.next()) != null) {
+                buffers.add(Unpooled.wrappedBuffer(slice.bytes, slice.offset, slice.length));
             }
+
+            if (buffers.size() == 1) {
+                return buffers.get(0);
+            } else {
+                CompositeByteBuf composite = Unpooled.compositeBuffer(buffers.size());
+                composite.addComponents(true, buffers);
+                return composite;
+            }
+        } catch (IOException ex) {
+            throw new AssertionError("no IO happens here", ex);
         }
     }
 
@@ -112,7 +103,18 @@ public class Netty4Utils {
         final int readableBytes = buffer.readableBytes();
         if (readableBytes == 0) {
             return BytesArray.EMPTY;
+        } else if (buffer.hasArray()) {
+            return new BytesArray(buffer.array(), buffer.arrayOffset() + buffer.readerIndex(), readableBytes);
+        } else {
+            final ByteBuffer[] byteBuffers = buffer.nioBuffers();
+            return BytesReference.fromByteBuffers(byteBuffers);
         }
-        return new ByteBufBytesReference(buffer, buffer.readableBytes());
+    }
+
+    public static Recycler<BytesRef> createRecycler(Settings settings) {
+        // If this method is called by super ctor the processors will not be set. Accessing NettyAllocator initializes netty's internals
+        // setting the processors. We must do it ourselves first just in case.
+        setAvailableProcessors(EsExecutors.NODE_PROCESSORS_SETTING.get(settings));
+        return NettyAllocator.getRecycler();
     }
 }

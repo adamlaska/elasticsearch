@@ -15,24 +15,25 @@
   - do:
       index:
         index:  upgraded_scroll
-        id:     42
+        id:     "42"
         body:   { foo: 1 }
 
   - do:
       index:
         index:  upgraded_scroll
-        id:     43
+        id:     "43"
         body:   { foo: 2 }
 
   - do:
-      indices.refresh: {}
+      indices.refresh:
+        index: upgraded_scroll
 
   - do:
       search:
         rest_total_hits_as_int: true
         index: upgraded_scroll
         size: 1
-        scroll: 5m
+        scroll: 60m
         sort: foo
         body:
           query:
@@ -45,5 +46,5 @@
   - do:
       index:
         index: scroll_index
-        id: 1
+        id: "1"
         body: { value: $scroll_id }

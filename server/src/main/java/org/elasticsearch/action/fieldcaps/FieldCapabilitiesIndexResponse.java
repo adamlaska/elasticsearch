@@ -1,52 +1,122 @@
 /*
- * Licensed to Elasticsearch under one or more contributor
- * license agreements. See the NOTICE file distributed with
- * this work for additional information regarding copyright
- * ownership. Elasticsearch licenses this file to you under
- * the Apache License, Version 2.0 (the "License"); you may
- * not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *    http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing,
- * software distributed under the License is distributed on an
- * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
- * KIND, either express or implied.  See the License for the
- * specific language governing permissions and limitations
- * under the License.
+ * Copyright Elasticsearch B.V. and/or licensed to Elasticsearch B.V. under one
+ * or more contributor license agreements. Licensed under the Elastic License
+ * 2.0 and the Server Side Public License, v 1; you may not use this file except
+ * in compliance with, at your election, the Elastic License 2.0 or the Server
+ * Side Public License, v 1.
  */
 
 package org.elasticsearch.action.fieldcaps;
 
-import org.elasticsearch.action.ActionResponse;
+import org.elasticsearch.Version;
 import org.elasticsearch.common.io.stream.StreamInput;
 import org.elasticsearch.common.io.stream.StreamOutput;
 import org.elasticsearch.common.io.stream.Writeable;
+import org.elasticsearch.core.Nullable;
 
 import java.io.IOException;
+import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.function.Predicate;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
-/**
- * Response for {@link FieldCapabilitiesIndexRequest} requests.
- */
-public class FieldCapabilitiesIndexResponse extends ActionResponse implements Writeable {
-    private String indexName;
-    private Map<String, FieldCapabilities> responseMap;
+final class FieldCapabilitiesIndexResponse implements Writeable {
+    private static final Version MAPPING_HASH_VERSION = Version.V_8_2_0;
 
-    FieldCapabilitiesIndexResponse(String indexName, Map<String, FieldCapabilities> responseMap) {
+    private final String indexName;
+    @Nullable
+    private final String indexMappingHash;
+    private final Map<String, IndexFieldCapabilities> responseMap;
+    private final boolean canMatch;
+    private final transient Version originVersion;
+
+    FieldCapabilitiesIndexResponse(
+        String indexName,
+        @Nullable String indexMappingHash,
+        Map<String, IndexFieldCapabilities> responseMap,
+        boolean canMatch
+    ) {
         this.indexName = indexName;
+        this.indexMappingHash = indexMappingHash;
         this.responseMap = responseMap;
+        this.canMatch = canMatch;
+        this.originVersion = Version.CURRENT;
     }
 
     FieldCapabilitiesIndexResponse(StreamInput in) throws IOException {
-        super(in);
         this.indexName = in.readString();
-        this.responseMap =
-            in.readMap(StreamInput::readString, FieldCapabilities::new);
+        this.responseMap = in.readMap(StreamInput::readString, IndexFieldCapabilities::new);
+        this.canMatch = in.readBoolean();
+        this.originVersion = in.getVersion();
+        if (in.getVersion().onOrAfter(MAPPING_HASH_VERSION)) {
+            this.indexMappingHash = in.readOptionalString();
+        } else {
+            this.indexMappingHash = null;
+        }
     }
 
+    @Override
+    public void writeTo(StreamOutput out) throws IOException {
+        out.writeString(indexName);
+        out.writeMap(responseMap, StreamOutput::writeString, (valueOut, fc) -> fc.writeTo(valueOut));
+        out.writeBoolean(canMatch);
+        if (out.getVersion().onOrAfter(MAPPING_HASH_VERSION)) {
+            out.writeOptionalString(indexMappingHash);
+        }
+    }
+
+    private record GroupByMappingHash(List<String> indices, String indexMappingHash, Map<String, IndexFieldCapabilities> responseMap)
+        implements
+            Writeable {
+        GroupByMappingHash(StreamInput in) throws IOException {
+            this(in.readStringList(), in.readString(), in.readMap(StreamInput::readString, IndexFieldCapabilities::new));
+        }
+
+        @Override
+        public void writeTo(StreamOutput out) throws IOException {
+            out.writeStringCollection(indices);
+            out.writeString(indexMappingHash);
+            out.writeMap(responseMap, StreamOutput::writeString, (valueOut, fc) -> fc.writeTo(valueOut));
+        }
+
+        List<FieldCapabilitiesIndexResponse> getResponses() {
+            return indices.stream().map(index -> new FieldCapabilitiesIndexResponse(index, indexMappingHash, responseMap, true)).toList();
+        }
+    }
+
+    static List<FieldCapabilitiesIndexResponse> readList(StreamInput input) throws IOException {
+        if (input.getVersion().before(MAPPING_HASH_VERSION)) {
+            return input.readList(FieldCapabilitiesIndexResponse::new);
+        }
+        final List<FieldCapabilitiesIndexResponse> ungroupedList = input.readList(FieldCapabilitiesIndexResponse::new);
+        final List<GroupByMappingHash> groups = input.readList(GroupByMappingHash::new);
+        return Stream.concat(ungroupedList.stream(), groups.stream().flatMap(g -> g.getResponses().stream())).toList();
+    }
+
+    static void writeList(StreamOutput output, List<FieldCapabilitiesIndexResponse> responses) throws IOException {
+        if (output.getVersion().before(MAPPING_HASH_VERSION)) {
+            output.writeCollection(responses);
+            return;
+        }
+        final Predicate<FieldCapabilitiesIndexResponse> canGroup = r -> r.canMatch && r.indexMappingHash != null;
+        final List<FieldCapabilitiesIndexResponse> ungroupedResponses = responses.stream().filter(r -> canGroup.test(r) == false).toList();
+        final List<GroupByMappingHash> groupedResponses = responses.stream()
+            .filter(canGroup)
+            .collect(Collectors.groupingBy(r -> r.indexMappingHash))
+            .values()
+            .stream()
+            .map(rs -> {
+                final String indexMappingHash = rs.get(0).indexMappingHash;
+                final Map<String, IndexFieldCapabilities> responseMap = rs.get(0).responseMap;
+                final List<String> indices = rs.stream().map(r -> r.indexName).toList();
+                return new GroupByMappingHash(indices, indexMappingHash, responseMap);
+            })
+            .toList();
+        output.writeList(ungroupedResponses);
+        output.writeList(groupedResponses);
+    }
 
     /**
      * Get the index name
@@ -56,9 +126,21 @@ public class FieldCapabilitiesIndexResponse extends ActionResponse implements Wr
     }
 
     /**
+     * Returns the index mapping hash associated with this index if exists
+     */
+    @Nullable
+    public String getIndexMappingHash() {
+        return indexMappingHash;
+    }
+
+    public boolean canMatch() {
+        return canMatch;
+    }
+
+    /**
      * Get the field capabilities map
      */
-    public Map<String, FieldCapabilities> get() {
+    public Map<String, IndexFieldCapabilities> get() {
         return responseMap;
     }
 
@@ -66,15 +148,12 @@ public class FieldCapabilitiesIndexResponse extends ActionResponse implements Wr
      *
      * Get the field capabilities for the provided {@code field}
      */
-    public FieldCapabilities getField(String field) {
+    public IndexFieldCapabilities getField(String field) {
         return responseMap.get(field);
     }
 
-    @Override
-    public void writeTo(StreamOutput out) throws IOException {
-        out.writeString(indexName);
-        out.writeMap(responseMap,
-            StreamOutput::writeString, (valueOut, fc) -> fc.writeTo(valueOut));
+    Version getOriginVersion() {
+        return originVersion;
     }
 
     @Override
@@ -82,12 +161,14 @@ public class FieldCapabilitiesIndexResponse extends ActionResponse implements Wr
         if (this == o) return true;
         if (o == null || getClass() != o.getClass()) return false;
         FieldCapabilitiesIndexResponse that = (FieldCapabilitiesIndexResponse) o;
-        return Objects.equals(indexName, that.indexName) &&
-            Objects.equals(responseMap, that.responseMap);
+        return canMatch == that.canMatch
+            && Objects.equals(indexName, that.indexName)
+            && Objects.equals(indexMappingHash, that.indexMappingHash)
+            && Objects.equals(responseMap, that.responseMap);
     }
 
     @Override
     public int hashCode() {
-        return Objects.hash(indexName, responseMap);
+        return Objects.hash(indexName, indexMappingHash, responseMap, canMatch);
     }
 }

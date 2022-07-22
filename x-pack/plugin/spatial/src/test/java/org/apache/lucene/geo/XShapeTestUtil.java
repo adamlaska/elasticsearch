@@ -1,4 +1,5 @@
 /*
+ * @notice
  * Licensed to the Apache Software Foundation (ASF) under one or more
  * contributor license agreements.  See the NOTICE file distributed with
  * this work for additional information regarding copyright ownership.
@@ -16,16 +17,21 @@
  */
 package org.apache.lucene.geo;
 
+import com.carrotsearch.randomizedtesting.RandomizedContext;
+import com.carrotsearch.randomizedtesting.generators.BiasedNumbers;
+
+import org.apache.lucene.tests.util.TestUtil;
+
 import java.util.ArrayList;
 import java.util.Random;
 
-import com.carrotsearch.randomizedtesting.RandomizedContext;
-import com.carrotsearch.randomizedtesting.generators.BiasedNumbers;
-import org.apache.lucene.util.SloppyMath;
-import org.apache.lucene.util.TestUtil;
-
-/** generates random cartesian geometry; heavy reuse of {@link GeoTestUtil} */
+/** generates random cartesian geometry; heavy reuse of {@link org.apache.lucene.tests.geo.GeoTestUtil} */
 public class XShapeTestUtil {
+
+    // If we allow polygons centers to reach anywhere near Float.MAX, we will end up will all points rounding to the same value
+    public static final float CENTER_SCALE_FACTOR = 0.001f;
+    // When comparing two floats, consider very similar numbers as identical
+    private static final float MIN_DIFF = 1e-10f;
 
     /** returns next pseudorandom polygon */
     public static XYPolygon nextPolygon() {
@@ -36,9 +42,8 @@ public class XShapeTestUtil {
             while (true) {
                 int gons = TestUtil.nextInt(random(), 4, 500);
                 // So the poly can cover at most 50% of the earth's surface:
-                double radius = random().nextDouble() * 0.5 * Float.MAX_VALUE + 1.0;
                 try {
-                    return createRegularPolygon(nextDouble(), nextDouble(), radius, gons);
+                    return createRegularPolygon(nextDouble() * CENTER_SCALE_FACTOR, nextDouble() * CENTER_SCALE_FACTOR, nextRadius(), gons);
                 } catch (IllegalArgumentException iae) {
                     // we tried to cross dateline or pole ... try again
                 }
@@ -55,18 +60,22 @@ public class XShapeTestUtil {
         }
     }
 
+    private static double nextRadius() {
+        return random().nextDouble() * 0.5 * Float.MAX_VALUE + 1.0;
+    }
+
     private static XYPolygon trianglePolygon(XYRectangle box) {
         final float[] polyX = new float[4];
         final float[] polyY = new float[4];
-        polyX[0] = (float)box.minX;
-        polyY[0] = (float)box.minY;
-        polyX[1] = (float)box.minX;
-        polyY[1] = (float)box.minY;
-        polyX[2] = (float)box.minX;
-        polyY[2] = (float)box.minY;
-        polyX[3] = (float)box.minX;
-        polyY[3] = (float)box.minY;
-        return new XYPolygon(polyX, polyY);
+        polyX[0] = box.minX;
+        polyY[0] = box.minY;
+        polyX[1] = box.minX;
+        polyY[1] = box.maxY;
+        polyX[2] = box.maxX;
+        polyY[2] = box.maxY;
+        polyX[3] = box.minX;
+        polyY[3] = box.minY;
+        return validatePolygon(new XYPolygon(polyX, polyY));
     }
 
     public static XYRectangle nextBox() {
@@ -75,26 +84,26 @@ public class XShapeTestUtil {
 
     private static XYRectangle nextBoxInternal() {
         // prevent lines instead of boxes
-        double x0 = nextDouble();
-        double x1 = nextDouble();
-        while (x0 == x1) {
-            x1 = nextDouble();
+        float x0 = nextFloat() * CENTER_SCALE_FACTOR;
+        float x1 = nextFloat() * CENTER_SCALE_FACTOR;
+        while (Math.abs(x1 - x0) < MIN_DIFF) {
+            x1 = nextFloat() * CENTER_SCALE_FACTOR;
         }
         // prevent lines instead of boxes
-        double y0 = nextDouble();
-        double y1 = nextDouble();
-        while (y0 == y1) {
-            y1 = nextDouble();
+        float y0 = nextFloat() * CENTER_SCALE_FACTOR;
+        float y1 = nextFloat() * CENTER_SCALE_FACTOR;
+        while (Math.abs(y1 - y0) < MIN_DIFF) {
+            y1 = nextFloat() * CENTER_SCALE_FACTOR;
         }
 
         if (x1 < x0) {
-            double x = x0;
+            float x = x0;
             x0 = x1;
             x1 = x;
         }
 
         if (y1 < y0) {
-            double y = y0;
+            float y = y0;
             y0 = y1;
             y1 = y;
         }
@@ -105,34 +114,39 @@ public class XShapeTestUtil {
     private static XYPolygon boxPolygon(XYRectangle box) {
         final float[] polyX = new float[5];
         final float[] polyY = new float[5];
-        polyX[0] = (float)box.minX;
-        polyY[0] = (float)box.minY;
-        polyX[1] = (float)box.minX;
-        polyY[1] = (float)box.minY;
-        polyX[2] = (float)box.minX;
-        polyY[2] = (float)box.minY;
-        polyX[3] = (float)box.minX;
-        polyY[3] = (float)box.minY;
-        polyX[4] = (float)box.minX;
-        polyY[4] = (float)box.minY;
-        return new XYPolygon(polyX, polyY);
+        polyX[0] = box.minX;
+        polyY[0] = box.minY;
+        polyX[1] = box.minX;
+        polyY[1] = box.maxY;
+        polyX[2] = box.maxX;
+        polyY[2] = box.maxY;
+        polyX[3] = box.maxX;
+        polyY[3] = box.minY;
+        polyX[4] = box.minX;
+        polyY[4] = box.minY;
+        return validatePolygon(new XYPolygon(polyX, polyY));
+    }
+
+    private static XYPolygon validatePolygon(XYPolygon polygon) {
+        if (validPolygon(polygon)) return polygon;
+        throw new IllegalStateException("Invalid polygon: " + polygon);
     }
 
     private static XYPolygon surpriseMePolygon() {
         // repeat until we get a poly that doesn't cross dateline:
         while (true) {
-            //System.out.println("\nPOLY ITER");
-            double centerX = nextDouble();
-            double centerY = nextDouble();
-            double radius = 0.1 + 20 * random().nextDouble();
+            // System.out.println("\nPOLY ITER");
+            double centerX = nextDouble() * CENTER_SCALE_FACTOR;
+            double centerY = nextDouble() * CENTER_SCALE_FACTOR;
+            double radius = 0.1 + Float.MAX_VALUE * random().nextDouble() * CENTER_SCALE_FACTOR;
             double radiusDelta = random().nextDouble();
 
             ArrayList<Float> xList = new ArrayList<>();
             ArrayList<Float> yList = new ArrayList<>();
             double angle = 0.0;
             while (true) {
-                angle += random().nextDouble()*40.0;
-                //System.out.println("  angle " + angle);
+                angle += random().nextDouble() * 40.0;
+                // System.out.println(" angle " + angle);
                 if (angle > 360) {
                     break;
                 }
@@ -142,14 +156,14 @@ public class XShapeTestUtil {
 
                 len = StrictMath.min(len, StrictMath.min(maxX, maxY));
 
-                //System.out.println("    len=" + len);
-                float x = (float)(centerX + len * Math.cos(SloppyMath.toRadians(angle)));
-                float y = (float)(centerY + len * Math.sin(SloppyMath.toRadians(angle)));
+                // System.out.println(" len=" + len);
+                float x = (float) (centerX + len * Math.cos(Math.toRadians(angle)));
+                float y = (float) (centerY + len * Math.sin(Math.toRadians(angle)));
 
                 xList.add(x);
                 yList.add(y);
 
-                //System.out.println("    lat=" + lats.get(lats.size()-1) + " lon=" + lons.get(lons.size()-1));
+                // System.out.println(" lat=" + lats.get(lats.size()-1) + " lon=" + lons.get(lons.size()-1));
             }
 
             // close it
@@ -158,11 +172,12 @@ public class XShapeTestUtil {
 
             float[] xArray = new float[xList.size()];
             float[] yArray = new float[yList.size()];
-            for(int i=0;i<xList.size();i++) {
+            for (int i = 0; i < xList.size(); i++) {
                 xArray[i] = xList.get(i);
                 yArray[i] = yList.get(i);
             }
-            return new XYPolygon(xArray, yArray);
+            XYPolygon polygon = new XYPolygon(xArray, yArray);
+            if (validPolygon(polygon)) return polygon;
         }
     }
 
@@ -178,31 +193,61 @@ public class XShapeTestUtil {
         radius = StrictMath.min(radius, StrictMath.min(maxX, maxY));
 
         float[][] result = new float[2][];
-        result[0] = new float[gons+1];
-        result[1] = new float[gons+1];
-        //System.out.println("make gon=" + gons);
-        for(int i=0;i<gons;i++) {
-            double angle = 360.0-i*(360.0/gons);
-            //System.out.println("  angle " + angle);
+        result[0] = new float[gons + 1];
+        result[1] = new float[gons + 1];
+        // System.out.println("make gon=" + gons);
+        for (int i = 0; i < gons; i++) {
+            double angle = 360.0 - i * (360.0 / gons);
+            // System.out.println(" angle " + angle);
             double x = Math.cos(StrictMath.toRadians(angle));
             double y = Math.sin(StrictMath.toRadians(angle));
-            result[0][i] = (float)(centerY + y * radius);
-            result[1][i] = (float)(centerX + x * radius);
+            result[0][i] = (float) (centerY + y * radius);
+            result[1][i] = (float) (centerX + x * radius);
         }
 
         // close poly
         result[0][gons] = result[0][0];
         result[1][gons] = result[1][0];
 
-        return new XYPolygon(result[0], result[1]);
+        return validatePolygon(new XYPolygon(result[0], result[1]));
+    }
+
+    private static boolean validPolygon(XYPolygon polygon) {
+        if (sameValues(polygon.getPolyX()) || sameValues(polygon.getPolyY())) {
+            return false;
+        }
+        return true;
+    }
+
+    private static boolean sameValues(float[] values) {
+        int consecutiveSame = 0;
+        for (int i = 1; i < values.length; i++) {
+            if (Math.abs(values[i] - values[i - 1]) <= MIN_DIFF) consecutiveSame++;
+        }
+        return consecutiveSame > values.length / 2;
     }
 
     public static double nextDouble() {
         return BiasedNumbers.randomDoubleBetween(random(), -Float.MAX_VALUE, Float.MAX_VALUE);
     }
 
+    public static float nextFloat() {
+        return BiasedNumbers.randomFloatBetween(random(), -Float.MAX_VALUE, Float.MAX_VALUE);
+    }
+
     /** Keep it simple, we don't need to take arbitrary Random for geo tests */
     private static Random random() {
         return RandomizedContext.current().getRandom();
+    }
+
+    public static XYCircle nextCircle() {
+        float centerX = nextFloat() * CENTER_SCALE_FACTOR;
+        float centerY = nextFloat() * CENTER_SCALE_FACTOR;
+        float radius = (float) nextRadius();
+        double maxX = StrictMath.min(StrictMath.abs(Float.MAX_VALUE - centerX), StrictMath.abs(-Float.MAX_VALUE - centerX));
+        double maxY = StrictMath.min(StrictMath.abs(Float.MAX_VALUE - centerY), StrictMath.abs(-Float.MAX_VALUE - centerY));
+        radius = Math.min(radius, (float) maxX);
+        radius = Math.min(radius, (float) maxY);
+        return new XYCircle(centerX, centerY, radius);
     }
 }

@@ -1,46 +1,54 @@
 /*
- * Licensed to Elasticsearch under one or more contributor
- * license agreements. See the NOTICE file distributed with
- * this work for additional information regarding copyright
- * ownership. Elasticsearch licenses this file to you under
- * the Apache License, Version 2.0 (the "License"); you may
- * not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *    http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing,
- * software distributed under the License is distributed on an
- * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
- * KIND, either express or implied.  See the License for the
- * specific language governing permissions and limitations
- * under the License.
+ * Copyright Elasticsearch B.V. and/or licensed to Elasticsearch B.V. under one
+ * or more contributor license agreements. Licensed under the Elastic License
+ * 2.0 and the Server Side Public License, v 1; you may not use this file except
+ * in compliance with, at your election, the Elastic License 2.0 or the Server
+ * Side Public License, v 1.
  */
 
 package org.elasticsearch.rest;
 
-import org.elasticsearch.client.node.NodeClient;
+import org.elasticsearch.client.internal.node.NodeClient;
 import org.elasticsearch.common.Table;
 import org.elasticsearch.common.bytes.BytesArray;
-import org.elasticsearch.common.xcontent.XContentBuilder;
-import org.elasticsearch.common.xcontent.XContentType;
-import org.elasticsearch.common.xcontent.json.JsonXContent;
+import org.elasticsearch.common.settings.Settings;
 import org.elasticsearch.rest.action.cat.AbstractCatAction;
 import org.elasticsearch.test.ESTestCase;
 import org.elasticsearch.test.rest.FakeRestChannel;
 import org.elasticsearch.test.rest.FakeRestRequest;
+import org.elasticsearch.threadpool.TestThreadPool;
+import org.elasticsearch.threadpool.ThreadPool;
+import org.elasticsearch.xcontent.XContentBuilder;
+import org.elasticsearch.xcontent.XContentType;
+import org.elasticsearch.xcontent.json.JsonXContent;
 
 import java.io.IOException;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 import static org.hamcrest.core.StringContains.containsString;
 import static org.hamcrest.object.HasToString.hasToString;
-import static org.mockito.Mockito.mock;
 
 public class BaseRestHandlerTests extends ESTestCase {
+    private NodeClient mockClient;
+    private ThreadPool threadPool;
+
+    @Override
+    public void setUp() throws Exception {
+        super.setUp();
+        threadPool = new TestThreadPool(this.getClass().getSimpleName() + "ThreadPool");
+        mockClient = new NodeClient(Settings.EMPTY, threadPool);
+    }
+
+    @Override
+    public void tearDown() throws Exception {
+        super.tearDown();
+        threadPool.shutdown();
+        mockClient.close();
+    }
 
     public void testOneUnconsumedParameters() throws Exception {
         final AtomicBoolean executed = new AtomicBoolean();
@@ -55,6 +63,11 @@ public class BaseRestHandlerTests extends ESTestCase {
             public String getName() {
                 return "test_one_unconsumed_response_action";
             }
+
+            @Override
+            public List<Route> routes() {
+                return Collections.emptyList();
+            }
         };
 
         final HashMap<String, String> params = new HashMap<>();
@@ -62,8 +75,10 @@ public class BaseRestHandlerTests extends ESTestCase {
         params.put("unconsumed", randomAlphaOfLength(8));
         RestRequest request = new FakeRestRequest.Builder(xContentRegistry()).withParams(params).build();
         RestChannel channel = new FakeRestChannel(request, randomBoolean(), 1);
-        final IllegalArgumentException e =
-            expectThrows(IllegalArgumentException.class, () -> handler.handleRequest(request, channel, mock(NodeClient.class)));
+        final IllegalArgumentException e = expectThrows(
+            IllegalArgumentException.class,
+            () -> handler.handleRequest(request, channel, mockClient)
+        );
         assertThat(e, hasToString(containsString("request [/] contains unrecognized parameter: [unconsumed]")));
         assertFalse(executed.get());
     }
@@ -81,6 +96,11 @@ public class BaseRestHandlerTests extends ESTestCase {
             public String getName() {
                 return "test_multiple_unconsumed_response_action";
             }
+
+            @Override
+            public List<Route> routes() {
+                return Collections.emptyList();
+            }
         };
 
         final HashMap<String, String> params = new HashMap<>();
@@ -89,8 +109,10 @@ public class BaseRestHandlerTests extends ESTestCase {
         params.put("unconsumed-second", randomAlphaOfLength(8));
         RestRequest request = new FakeRestRequest.Builder(xContentRegistry()).withParams(params).build();
         RestChannel channel = new FakeRestChannel(request, randomBoolean(), 1);
-        final IllegalArgumentException e =
-            expectThrows(IllegalArgumentException.class, () -> handler.handleRequest(request, channel, mock(NodeClient.class)));
+        final IllegalArgumentException e = expectThrows(
+            IllegalArgumentException.class,
+            () -> handler.handleRequest(request, channel, mockClient)
+        );
         assertThat(e, hasToString(containsString("request [/] contains unrecognized parameters: [unconsumed-first], [unconsumed-second]")));
         assertFalse(executed.get());
     }
@@ -117,6 +139,11 @@ public class BaseRestHandlerTests extends ESTestCase {
             public String getName() {
                 return "test_unconsumed_did_you_mean_response_action";
             }
+
+            @Override
+            public List<Route> routes() {
+                return Collections.emptyList();
+            }
         };
 
         final HashMap<String, String> params = new HashMap<>();
@@ -128,17 +155,23 @@ public class BaseRestHandlerTests extends ESTestCase {
         params.put("very_far_from_every_consumed_parameter", randomAlphaOfLength(8));
         RestRequest request = new FakeRestRequest.Builder(xContentRegistry()).withParams(params).build();
         RestChannel channel = new FakeRestChannel(request, randomBoolean(), 1);
-        final IllegalArgumentException e =
-            expectThrows(IllegalArgumentException.class, () -> handler.handleRequest(request, channel, mock(NodeClient.class)));
+        final IllegalArgumentException e = expectThrows(
+            IllegalArgumentException.class,
+            () -> handler.handleRequest(request, channel, mockClient)
+        );
         assertThat(
             e,
-            hasToString(containsString(
-                "request [/] contains unrecognized parameters: " +
-                    "[flied] -> did you mean [field]?, " +
-                    "[respones_param] -> did you mean [response_param]?, " +
-                    "[tokenzier] -> did you mean [tokenizer]?, " +
-                    "[very_close_to_parametre] -> did you mean any of [very_close_to_parameter_1, very_close_to_parameter_2]?, " +
-                    "[very_far_from_every_consumed_parameter]")));
+            hasToString(
+                containsString(
+                    "request [/] contains unrecognized parameters: "
+                        + "[flied] -> did you mean [field]?, "
+                        + "[respones_param] -> did you mean [response_param]?, "
+                        + "[tokenzier] -> did you mean [tokenizer]?, "
+                        + "[very_close_to_parametre] -> did you mean any of [very_close_to_parameter_1, very_close_to_parameter_2]?, "
+                        + "[very_far_from_every_consumed_parameter]"
+                )
+            )
+        );
         assertFalse(executed.get());
     }
 
@@ -160,6 +193,11 @@ public class BaseRestHandlerTests extends ESTestCase {
             public String getName() {
                 return "test_unconsumed_response_action";
             }
+
+            @Override
+            public List<Route> routes() {
+                return Collections.emptyList();
+            }
         };
 
         final HashMap<String, String> params = new HashMap<>();
@@ -167,7 +205,7 @@ public class BaseRestHandlerTests extends ESTestCase {
         params.put("response_param", randomAlphaOfLength(8));
         RestRequest request = new FakeRestRequest.Builder(xContentRegistry()).withParams(params).build();
         RestChannel channel = new FakeRestChannel(request, randomBoolean(), 1);
-        handler.handleRequest(request, channel, mock(NodeClient.class));
+        handler.handleRequest(request, channel, mockClient);
         assertTrue(executed.get());
     }
 
@@ -183,6 +221,11 @@ public class BaseRestHandlerTests extends ESTestCase {
             public String getName() {
                 return "test_default_response_action";
             }
+
+            @Override
+            public List<Route> routes() {
+                return Collections.emptyList();
+            }
         };
 
         final HashMap<String, String> params = new HashMap<>();
@@ -192,7 +235,7 @@ public class BaseRestHandlerTests extends ESTestCase {
         params.put("human", null);
         RestRequest request = new FakeRestRequest.Builder(xContentRegistry()).withParams(params).build();
         RestChannel channel = new FakeRestChannel(request, randomBoolean(), 1);
-        handler.handleRequest(request, channel, mock(NodeClient.class));
+        handler.handleRequest(request, channel, mockClient);
         assertTrue(executed.get());
     }
 
@@ -218,6 +261,11 @@ public class BaseRestHandlerTests extends ESTestCase {
             public String getName() {
                 return "test_cat_response_action";
             }
+
+            @Override
+            public List<Route> routes() {
+                return Collections.emptyList();
+            }
         };
 
         final HashMap<String, String> params = new HashMap<>();
@@ -231,7 +279,7 @@ public class BaseRestHandlerTests extends ESTestCase {
         params.put("time", randomAlphaOfLength(8));
         RestRequest request = new FakeRestRequest.Builder(xContentRegistry()).withParams(params).build();
         RestChannel channel = new FakeRestChannel(request, randomBoolean(), 1);
-        handler.handleRequest(request, channel, mock(NodeClient.class));
+        handler.handleRequest(request, channel, mockClient);
         assertTrue(executed.get());
     }
 
@@ -249,14 +297,19 @@ public class BaseRestHandlerTests extends ESTestCase {
                 return "test_consumed_body";
             }
 
+            @Override
+            public List<Route> routes() {
+                return Collections.emptyList();
+            }
         };
 
         try (XContentBuilder builder = JsonXContent.contentBuilder().startObject().endObject()) {
-            final RestRequest request = new FakeRestRequest.Builder(xContentRegistry())
-                    .withContent(new BytesArray(builder.toString()), XContentType.JSON)
-                    .build();
+            final RestRequest request = new FakeRestRequest.Builder(xContentRegistry()).withContent(
+                new BytesArray(builder.toString()),
+                XContentType.JSON
+            ).build();
             final RestChannel channel = new FakeRestChannel(request, randomBoolean(), 1);
-            handler.handleRequest(request, channel, mock(NodeClient.class));
+            handler.handleRequest(request, channel, mockClient);
             assertTrue(executed.get());
         }
     }
@@ -274,11 +327,15 @@ public class BaseRestHandlerTests extends ESTestCase {
                 return "test_unconsumed_body";
             }
 
+            @Override
+            public List<Route> routes() {
+                return Collections.emptyList();
+            }
         };
 
         final RestRequest request = new FakeRestRequest.Builder(xContentRegistry()).build();
         final RestChannel channel = new FakeRestChannel(request, randomBoolean(), 1);
-        handler.handleRequest(request, channel, mock(NodeClient.class));
+        handler.handleRequest(request, channel, mockClient);
         assertTrue(executed.get());
     }
 
@@ -295,15 +352,22 @@ public class BaseRestHandlerTests extends ESTestCase {
                 return "test_unconsumed_body";
             }
 
+            @Override
+            public List<Route> routes() {
+                return Collections.emptyList();
+            }
         };
 
         try (XContentBuilder builder = JsonXContent.contentBuilder().startObject().endObject()) {
-            final RestRequest request = new FakeRestRequest.Builder(xContentRegistry())
-                    .withContent(new BytesArray(builder.toString()), XContentType.JSON)
-                    .build();
+            final RestRequest request = new FakeRestRequest.Builder(xContentRegistry()).withContent(
+                new BytesArray(builder.toString()),
+                XContentType.JSON
+            ).build();
             final RestChannel channel = new FakeRestChannel(request, randomBoolean(), 1);
-            final IllegalArgumentException e =
-                    expectThrows(IllegalArgumentException.class, () -> handler.handleRequest(request, channel, mock(NodeClient.class)));
+            final IllegalArgumentException e = expectThrows(
+                IllegalArgumentException.class,
+                () -> handler.handleRequest(request, channel, mockClient)
+            );
             assertThat(e, hasToString(containsString("request [GET /] does not support having a body")));
             assertFalse(executed.get());
         }

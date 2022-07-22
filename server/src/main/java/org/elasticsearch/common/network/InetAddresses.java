@@ -1,4 +1,5 @@
 /*
+ * @notice
  * Copyright (C) 2008 The Guava Authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
@@ -16,7 +17,7 @@
 
 package org.elasticsearch.common.network;
 
-import org.elasticsearch.common.collect.Tuple;
+import org.elasticsearch.core.Tuple;
 
 import java.net.Inet4Address;
 import java.net.Inet6Address;
@@ -38,6 +39,7 @@ public class InetAddresses {
         // Make a first pass to categorize the characters in this string.
         boolean hasColon = false;
         boolean hasDot = false;
+        int percentIndex = -1;
         for (int i = 0; i < ipString.length(); i++) {
             char c = ipString.charAt(i);
             if (c == '.') {
@@ -47,6 +49,9 @@ public class InetAddresses {
                     return null;  // Colons must not appear after dots.
                 }
                 hasColon = true;
+            } else if (c == '%') {
+                percentIndex = i;
+                break; // Everything after a '%' is ignored (it's a Scope ID)
             } else if (Character.digit(c, 16) == -1) {
                 return null;  // Everything else must be a decimal or hex digit.
             }
@@ -59,6 +64,12 @@ public class InetAddresses {
                 if (ipString == null) {
                     return null;
                 }
+            }
+            if (percentIndex == ipString.length() - 1) {
+                return null;  // Filter out strings that end in % and have an empty scope ID.
+            }
+            if (percentIndex != -1) {
+                ipString = ipString.substring(0, percentIndex);
             }
             return textToNumericFormatV6(ipString);
         } else if (hasDot) {
@@ -81,32 +92,29 @@ public class InetAddresses {
     }
 
     private static byte[] textToNumericFormatV4(String ipString) {
-        String[] address = ipString.split("\\.", IPV4_PART_COUNT + 1);
-        if (address.length != IPV4_PART_COUNT) {
-            return null;
-        }
-
         byte[] bytes = new byte[IPV4_PART_COUNT];
-        try {
-            for (int i = 0; i < bytes.length; i++) {
-                bytes[i] = parseOctet(address[i]);
+        byte octet = 0;
+        byte digits = 0;
+        for (int i = 0; i < ipString.length(); i++) {
+            char c = ipString.charAt(i);
+            if (c == '.') {
+                octet++;
+                if (octet > 3 /* too many octets */ || digits == 0 /* empty octet */) {
+                    return null;
+                }
+                digits = 0;
+            } else if (c >= '0' && c <= '9') {
+                digits++;
+                var next = bytes[octet] * 10 + (c - '0');
+                if (next > 255 /* octet is outside a byte range */ || (digits > 1 && bytes[octet] == 0) /* octet contains leading 0 */) {
+                    return null;
+                }
+                bytes[octet] = (byte) next;
+            } else {
+                return null;
             }
-        } catch (NumberFormatException ex) {
-            return null;
         }
-
-        return bytes;
-    }
-
-    private static byte parseOctet(String ipPart) {
-        // Note: we already verified that this string contains only hex digits.
-        int octet = Integer.parseInt(ipPart);
-        // Disallow leading zeroes, because no clear standard exists on
-        // whether these should be interpreted as decimal or octal.
-        if (octet > 255 || (ipPart.startsWith("0") && ipPart.length() > 1)) {
-            throw new NumberFormatException();
-        }
-        return (byte) octet;
+        return octet != 3 ? null : bytes;
     }
 
     private static byte[] textToNumericFormatV6(String ipString) {
@@ -141,7 +149,7 @@ public class InetAddresses {
                 return null;  // :$ requires ::$
             }
         } else {
-            // Otherwise, allocate the entire address to partsHi.  The endpoints
+            // Otherwise, allocate the entire address to partsHi. The endpoints
             // could still be empty, but parseHextet() will check for that.
             partsHi = parts.length;
             partsLo = 0;
@@ -150,7 +158,7 @@ public class InetAddresses {
         // If we found a ::, then we must have skipped at least one part.
         // Otherwise, we must have exactly the right number of parts.
         int partsSkipped = IPV6_PART_COUNT - (partsHi + partsLo);
-        if (!(skipIndex >= 0 ? partsSkipped >= 1 : partsSkipped == 0)) {
+        if ((skipIndex >= 0 ? partsSkipped >= 1 : partsSkipped == 0) == false) {
             return null;
         }
 
@@ -239,13 +247,13 @@ public class InetAddresses {
             byte[] bytes = ip.getAddress();
             return (bytes[0] & 0xff) + "." + (bytes[1] & 0xff) + "." + (bytes[2] & 0xff) + "." + (bytes[3] & 0xff);
         }
-        if (!(ip instanceof Inet6Address)) {
+        if ((ip instanceof Inet6Address) == false) {
             throw new IllegalArgumentException("ip");
         }
         byte[] bytes = ip.getAddress();
         int[] hextets = new int[IPV6_PART_COUNT];
         for (int i = 0; i < hextets.length; i++) {
-            hextets[i] =  (bytes[2 * i] & 255) << 8 | bytes[2 * i + 1] & 255;
+            hextets[i] = (bytes[2 * i] & 255) << 8 | bytes[2 * i + 1] & 255;
         }
         compressLongestRunOfZeroes(hextets);
         return hextetsToIPv6String(hextets);
@@ -292,12 +300,12 @@ public class InetAddresses {
      * @param hextets {@code int[]} array of eight 16-bit hextets, or -1s
      */
     private static String hextetsToIPv6String(int[] hextets) {
-    /*
-     * While scanning the array, handle these state transitions:
-     *   start->num => "num"     start->gap => "::"
-     *   num->num   => ":num"    num->gap   => "::"
-     *   gap->num   => "num"     gap->gap   => ""
-     */
+        /*
+         * While scanning the array, handle these state transitions:
+         *   start->num => "num"     start->gap => "::"
+         *   num->num   => ":num"    num->gap   => "::"
+         *   gap->num   => "num"     gap->gap   => ""
+         */
         StringBuilder buf = new StringBuilder(39);
         boolean lastWasNumber = false;
         for (int i = 0; i < hextets.length; i++) {
@@ -370,18 +378,35 @@ public class InetAddresses {
             final String addressString = fields[0];
             final InetAddress address = forString(addressString);
             if (addressString.contains(":") && address.getAddress().length == 4) {
-                throw new IllegalArgumentException("CIDR notation is not allowed with IPv6-mapped IPv4 address [" + addressString +
-                        " as it introduces ambiguity as to whether the prefix length should be interpreted as a v4 prefix length or a" +
-                        " v6 prefix length");
+                throw new IllegalArgumentException(
+                    "CIDR notation is not allowed with IPv6-mapped IPv4 address ["
+                        + addressString
+                        + " as it introduces ambiguity as to whether the prefix length should be interpreted as a v4 prefix length or a"
+                        + " v6 prefix length"
+                );
             }
             final int prefixLength = Integer.parseInt(fields[1]);
             if (prefixLength < 0 || prefixLength > 8 * address.getAddress().length) {
-                throw new IllegalArgumentException("Illegal prefix length [" + prefixLength + "] in [" + maskedAddress +
-                        "]. Must be 0-32 for IPv4 ranges, 0-128 for IPv6 ranges");
+                throw new IllegalArgumentException(
+                    "Illegal prefix length ["
+                        + prefixLength
+                        + "] in ["
+                        + maskedAddress
+                        + "]. Must be 0-32 for IPv4 ranges, 0-128 for IPv6 ranges"
+                );
             }
             return new Tuple<>(address, prefixLength);
         } else {
             throw new IllegalArgumentException("Expected [ip/prefix] but was [" + maskedAddress + "]");
         }
+    }
+
+    /**
+     * Given an address and prefix length, returns the string representation of the range in CIDR notation.
+     *
+     * See {@link #toAddrString} for details on how the address is represented.
+     */
+    public static String toCidrString(InetAddress address, int prefixLength) {
+        return new StringBuilder().append(toAddrString(address)).append("/").append(prefixLength).toString();
     }
 }
